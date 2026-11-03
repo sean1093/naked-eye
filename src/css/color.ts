@@ -720,6 +720,15 @@ export function parseLegacyColor(input: string): RGBA | null {
   return { r, g, b, a: 1 };
 }
 
+/**
+ * The page canvas both modes composite the bottom-most background over, as
+ * Chromium paints it. Browser mode uses the same two colors rather than the
+ * engine's own dark canvas, so a contrast verdict does not depend on which
+ * browser is driving.
+ */
+export const LIGHT_CANVAS: RGBA = { r: 1, g: 1, b: 1, a: 1 };
+export const DARK_CANVAS: RGBA = { r: 0x12 / 255, g: 0x12 / 255, b: 0x12 / 255, a: 1 };
+
 /** Composites `top` over an opaque `bottom`. */
 export function over(top: RGBA, bottom: RGBA): RGBA {
   const blend = (a: number, b: number): number => a * top.a + b * (1 - top.a);
