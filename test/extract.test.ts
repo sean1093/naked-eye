@@ -93,9 +93,45 @@ describe('extractVisible', () => {
     ).toBe('');
   });
 
+  it('keeps text in a color it cannot evaluate, and warns', () => {
+    const result = extractVisible(
+      documentOf('<p style="color: rgb(from white r g b)">relative</p>'),
+    );
+    expect(result.text).toBe('relative');
+    expect(result.warnings).toEqual([
+      {
+        code: 'unsupported-color',
+        message: 'Unsupported color rgb(from …): text drawn with it was kept',
+      },
+    ]);
+  });
+
+  it('applies the contrast threshold and the preferred color scheme it is given', () => {
+    const gray = documentOf('<p style="color: #777">gray</p>');
+    expect(extractVisible(gray).text).toBe('gray');
+    expect(extractVisible(gray, { minContrast: 5 }).hidden).toEqual([
+      {
+        text: 'gray',
+        reason: 'low-contrast',
+        selector: 'html > body > p',
+        detail: '#777777 on #ffffff, contrast 4.48:1',
+      },
+    ]);
+    const adaptive =
+      '<!doctype html><html style="color-scheme: light dark"><body><p style="color: light-dark(#111, #eee)">adaptive</p></body></html>';
+    expect(extractVisible(adaptive).text).toBe('adaptive');
+    expect(extractVisible(adaptive, { colorScheme: 'dark' }).text).toBe('adaptive');
+    const fixed =
+      '<!doctype html><html style="color-scheme: light dark"><body><p style="color: #111">fixed</p></body></html>';
+    expect(
+      extractVisible(fixed, { colorScheme: 'dark' }).hidden.map((finding) => finding.reason),
+    ).toEqual(['low-contrast']);
+  });
+
   it('rejects invalid options', () => {
     expect(() => extractVisible('', { minFontSize: -1 })).toThrow(TypeError);
     expect(() => extractVisible('', { minOpacity: Number.NaN })).toThrow(TypeError);
+    expect(() => extractVisible('', { minContrast: Number.POSITIVE_INFINITY })).toThrow(TypeError);
     expect(() => extractVisible('', { viewport: { width: 0, height: 800 } })).toThrow(TypeError);
   });
 

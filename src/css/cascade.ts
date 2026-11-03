@@ -22,6 +22,7 @@ import {
   resolveLength,
   resolveNumber,
 } from './calc.js';
+import { type Color, type RGBA, resolveColor, type Scheme } from './color.js';
 import {
   type Environment,
   evaluateMediaQueryList,
@@ -37,6 +38,7 @@ import {
   type Longhand,
   longhandsOf,
   type Offset,
+  type Paint,
   parseProperty,
   type Size,
   type Values,
@@ -124,6 +126,30 @@ export interface Style {
   paddingLeft: Length;
   /** The `perspective` distance in px for children's 3D transforms, or `null`. */
   perspective: number | null;
+  /** The used color scheme. */
+  colorScheme: Scheme;
+  colorSchemeSpec: Values['color-scheme'];
+  /** `null` for a color this engine cannot evaluate. */
+  color: RGBA | null;
+  backgroundColor: RGBA | null;
+  backgroundImage: boolean;
+  /** The glyph fill: `-webkit-text-fill-color`, which defaults to `color`. */
+  textFill: RGBA | null;
+  strokeWidth: number;
+  strokeColor: RGBA | null;
+  shadows: (RGBA | null)[];
+  /** Specified values that inherit unresolved, so `currentcolor` follows each element's color. */
+  fillSpec: Color;
+  strokeSpec: Color;
+  shadowSpecs: Color[];
+  /** SVG text paints with `fill` and `stroke`; `null` is a color this engine cannot evaluate. */
+  svgFill: RGBA | 'none' | null;
+  svgStroke: RGBA | 'none' | null;
+  fillOpacity: number;
+  strokeOpacity: number;
+  svgStrokeWidth: number;
+  fillPaintSpec: Paint;
+  strokePaintSpec: Paint;
 }
 
 export interface StyleEngine {
@@ -324,6 +350,25 @@ const INITIAL_STYLE: Style = {
   paddingBottom: 0,
   paddingLeft: 0,
   perspective: null,
+  colorScheme: 'light',
+  colorSchemeSpec: 'normal',
+  color: { r: 0, g: 0, b: 0, a: 1 },
+  backgroundColor: { r: 0, g: 0, b: 0, a: 0 },
+  backgroundImage: false,
+  textFill: { r: 0, g: 0, b: 0, a: 1 },
+  strokeWidth: 0,
+  strokeColor: { r: 0, g: 0, b: 0, a: 1 },
+  shadows: [],
+  fillSpec: { kind: 'currentcolor' },
+  strokeSpec: { kind: 'currentcolor' },
+  shadowSpecs: [],
+  svgFill: { r: 0, g: 0, b: 0, a: 1 },
+  svgStroke: 'none',
+  fillOpacity: 1,
+  strokeOpacity: 1,
+  svgStrokeWidth: 1,
+  fillPaintSpec: { kind: 'rgba', value: { r: 0, g: 0, b: 0, a: 1 } },
+  strokePaintSpec: 'none',
 };
 
 function elementChildren(node: { children: AnyNode[] }): Element[] {
@@ -1326,6 +1371,72 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       style.perspective = typeof distance === 'number' && distance > 0 ? distance : null;
     }
     style.intrinsicHeight = plain('contain-intrinsic-height', parentStyle.intrinsicHeight, false);
+
+    const scheme = plain('color-scheme', parentStyle.colorSchemeSpec, 'normal');
+    style.colorSchemeSpec = scheme;
+    if (scheme === 'normal' || !scheme.dark) style.colorScheme = 'light';
+    else style.colorScheme = scheme.light ? environment.colorScheme : 'dark';
+    const resolve = (color: Color, current: RGBA | null): RGBA | null => {
+      const value = resolveColor(color, current, style.colorScheme);
+      if (color.kind === 'unknown')
+        warn('unsupported-color', `Unsupported color ${color.text}: text drawn with it was kept`);
+      return value;
+    };
+    const color = specified('color');
+    // The root has nothing to inherit from: its initial color, CanvasText, follows its own scheme.
+    if (color === 'inherit') {
+      style.color =
+        parentElement === null ? resolve(LONGHANDS.color.initial, null) : parentStyle.color;
+    } else if (color === 'initial') style.color = resolve(LONGHANDS.color.initial, null);
+    else
+      style.color =
+        color.kind === 'currentcolor' ? parentStyle.color : resolve(color, parentStyle.color);
+    const background = specified('background-color');
+    style.backgroundColor =
+      background === 'inherit'
+        ? parentStyle.backgroundColor
+        : background === 'initial'
+          ? INITIAL_STYLE.backgroundColor
+          : resolve(background, style.color);
+    style.backgroundImage = plain('background-image', parentStyle.backgroundImage, false);
+    style.fillSpec = plain('-webkit-text-fill-color', parentStyle.fillSpec, {
+      kind: 'currentcolor',
+    });
+    style.textFill = resolve(style.fillSpec, style.color);
+    style.strokeSpec = plain('-webkit-text-stroke-color', parentStyle.strokeSpec, {
+      kind: 'currentcolor',
+    });
+    style.strokeColor = resolve(style.strokeSpec, style.color);
+    const stroke = specified('-webkit-text-stroke-width');
+    if (stroke === 'inherit') style.strokeWidth = parentStyle.strokeWidth;
+    else if (stroke !== 'initial') {
+      const width = resolveLength(stroke, ctx);
+      style.strokeWidth = typeof width === 'number' ? Math.max(0, width) : 0;
+    }
+    style.shadowSpecs = plain('text-shadow', parentStyle.shadowSpecs, []);
+    style.shadows = style.shadowSpecs.map((shadow) => resolve(shadow, style.color));
+
+    const paint = (spec: Paint): RGBA | 'none' | null =>
+      spec === 'none' ? 'none' : spec === 'other' ? null : resolve(spec, style.color);
+    style.fillPaintSpec = plain('fill', parentStyle.fillPaintSpec, LONGHANDS.fill.initial);
+    style.strokePaintSpec = plain('stroke', parentStyle.strokePaintSpec, 'none');
+    style.svgFill = paint(style.fillPaintSpec);
+    style.svgStroke = paint(style.strokePaintSpec);
+    const unit = (property: 'fill-opacity' | 'stroke-opacity', inherited: number): number => {
+      const value = specified(property);
+      if (value === 'inherit') return inherited;
+      if (value === 'initial') return 1;
+      const resolved = resolveNumber(value, ctx);
+      return typeof resolved === 'number' ? Math.min(1, Math.max(0, resolved)) : 1;
+    };
+    style.fillOpacity = unit('fill-opacity', parentStyle.fillOpacity);
+    style.strokeOpacity = unit('stroke-opacity', parentStyle.strokeOpacity);
+    const svgStroke = specified('stroke-width');
+    if (svgStroke === 'inherit') style.svgStrokeWidth = parentStyle.svgStrokeWidth;
+    else if (svgStroke !== 'initial') {
+      const width = resolveLength(svgStroke, ctx);
+      style.svgStrokeWidth = typeof width === 'number' ? Math.max(0, width) : 1;
+    }
 
     const computed: Computed = { style, custom };
     cache.set(element, computed);

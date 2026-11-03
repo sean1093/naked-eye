@@ -142,11 +142,15 @@ reach in a browser ([#4][i4]).
 
 | Technique | Example | Static | Browser | Reason | Issue |
 |---|---|---|---|---|---|
-| Transparent text | `color: transparent`, `-webkit-text-fill-color: transparent` | yes | yes | `transparent-text` | [#6][i6] |
-| Text the color of its background | white on white, in any color syntax | yes | yes | `low-contrast` | [#6][i6] |
+| Transparent text | `color: transparent`, `-webkit-text-fill-color: transparent`, SVG `fill-opacity: 0` | yes | yes | `transparent-text` | [#6][i6] |
+| Text the color of its background | white on white, in any color syntax, `<font color>`, SVG `fill` | yes | yes | `low-contrast` | [#6][i6] |
 
-A background image or gradient behind the text makes contrast unknowable
-without pixels, so the text is kept.
+Contrast is the WCAG ratio between the text, composited with its effective
+opacity, and the background behind it: translucent backgrounds of the element
+and its ancestors composited over the canvas. A stroke or a text shadow that
+draws the glyphs in a visible color keeps the text. A background image or
+gradient behind the text makes contrast unknowable without pixels, so the text
+is kept.
 
 ### Characters that render as nothing
 
@@ -199,6 +203,16 @@ position, subject to the same hiding rules, and lists each insertion in
   through.
 - **Animations** other than the end state of fill-forwards animations, and
   **transitions**, are not modelled.
+- **Colors it cannot evaluate.** Relative color syntax (`rgb(from …)`),
+  `contrast-color()` and `device-cmyk()` keep the text and add an
+  `unsupported-color` warning. `color-mix()` in a polar space is mixed in its
+  rectangular counterpart, which differs from a browser only for mixes of
+  different hues.
+- **Form constraints.** `:invalid` and `:valid` evaluate `required`, e-mail and
+  URL syntax, and number ranges and steps, but not `pattern`: a hostile pattern
+  could stall the regular expression engine.
+- **Shapes painted under SVG text** are not considered when judging its
+  contrast.
 
 ### Both modes
 

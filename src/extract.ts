@@ -5,6 +5,7 @@
  */
 import type { AnyNode, Document, Element, ParentNode } from 'domhandler';
 import { createStyleEngine, type Style, type StyleEngine, type World } from './css/cascade.js';
+import { contrast, over, type RGBA, toHex } from './css/color.js';
 import { DepthExceededError, parseHtml } from './dom.js';
 import { assemble, type Layout, type RenderNode, type Space, type Verdict } from './render.js';
 import type { ExtractOptions, ExtractResult, HiddenReason } from './types.js';
@@ -79,6 +80,7 @@ interface Limits {
   minFontSize: number;
   minOpacity: number;
   offScreenDistance: number;
+  minContrast: number;
 }
 
 /** What an element passes down to its content, in one world. */
@@ -95,6 +97,8 @@ interface Frame {
   offscreen: Verdict | null;
   /** The parent's `perspective` distance, for 3D transforms of its children. */
   perspective: number | null;
+  /** Text color invisible against the background. */
+  color: Verdict | null;
   opacity: number;
   scale: number;
   shiftX: number;
@@ -119,11 +123,15 @@ const ROOT_FRAME: Frame = {
   indent: null,
   offscreen: null,
   perspective: null,
+  color: null,
   opacity: 1,
   scale: 1,
   shiftX: 0,
   shiftY: 0,
 };
+
+const LIGHT_CANVAS: RGBA = { r: 1, g: 1, b: 1, a: 1 };
+const DARK_CANVAS: RGBA = { r: 0x12 / 255, g: 0x12 / 255, b: 0x12 / 255, a: 1 };
 
 const isElement = (node: AnyNode): node is Element =>
   node.type === 'tag' || node.type === 'script' || node.type === 'style';
@@ -215,6 +223,7 @@ function resolveLimits(options: ExtractOptions): Limits {
     minFontSize: options.minFontSize ?? 4,
     minOpacity: options.minOpacity ?? 0.1,
     offScreenDistance: options.offScreenDistance ?? 1000,
+    minContrast: options.minContrast ?? 1.5,
   };
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isFinite(value) || value < 0)
@@ -253,8 +262,83 @@ class Extractor {
     return { reason, selector: this.selectorOf(element), detail };
   }
 
+  private readonly backgrounds: Map<Element, RGBA | null>[] = [new Map(), new Map()];
+
+  /**
+   * The opaque color behind an element's content: its background and its
+   * ancestors' composited over the canvas. `null` when an image is in the
+   * way or a color cannot be evaluated: contrast is then unknown.
+   */
+  private backgroundOf(element: Element, world: World): RGBA | null {
+    const cache = this.backgrounds[world] as Map<Element, RGBA | null>;
+    const cached = cache.get(element);
+    if (cached !== undefined) return cached;
+    const style = this.engine.style(element, world);
+    let result: RGBA | null;
+    if (style.backgroundImage || style.backgroundColor === null) result = null;
+    else if (style.backgroundColor.a >= 1) result = style.backgroundColor;
+    else {
+      const parent = element.parent !== null && isElement(element.parent) ? element.parent : null;
+      const below =
+        parent === null
+          ? style.colorScheme === 'dark'
+            ? DARK_CANVAS
+            : LIGHT_CANVAS
+          : this.backgroundOf(parent, world);
+      result =
+        below === null
+          ? null
+          : style.backgroundColor.a === 0
+            ? below
+            : over(style.backgroundColor, below);
+    }
+    cache.set(element, result);
+    return result;
+  }
+
+  /** Transparent or low-contrast text: every ink that draws the glyphs is invisible. */
+  private colorVerdict(
+    element: Element,
+    style: Style,
+    frame: Frame,
+    parent: Frame,
+    world: World,
+  ): Verdict | null {
+    const background = this.backgroundOf(element, world);
+    if (background === null) return null;
+    const inks: (RGBA | null)[] = [];
+    const withAlpha = (ink: RGBA | null, alpha: number): RGBA | null =>
+      ink === null ? null : { ...ink, a: ink.a * alpha };
+    if (element.namespace === SVG_NAMESPACE) {
+      if (style.svgFill !== 'none') inks.push(withAlpha(style.svgFill, style.fillOpacity));
+      if (style.svgStroke !== 'none' && style.svgStrokeWidth > 0)
+        inks.push(withAlpha(style.svgStroke, style.strokeOpacity));
+    } else {
+      inks.push(style.textFill);
+      if (style.strokeWidth > 0) inks.push(style.strokeColor);
+      inks.push(...style.shadows);
+    }
+    if (inks.includes(null)) return null;
+    let best = 0;
+    let painted = false;
+    for (const ink of inks as RGBA[]) {
+      const alpha = ink.a * frame.opacity;
+      if (alpha <= 0) continue;
+      painted = true;
+      best = Math.max(best, contrast(over({ ...ink, a: alpha }, background), background));
+    }
+    if (painted && best >= this.limits.minContrast) return null;
+    const fill = inks[0] ?? { r: 0, g: 0, b: 0, a: 0 };
+    const reason: HiddenReason = painted ? 'low-contrast' : 'transparent-text';
+    const detail = painted
+      ? `${toHex(fill)} on ${toHex(background)}, contrast ${best.toFixed(2)}:1`
+      : `text color ${toHex(fill)} is fully transparent`;
+    if (parent.color?.reason === reason && parent.color.detail === detail) return parent.color;
+    return this.verdict(reason, element, detail);
+  }
+
   /** The frame an element passes to its content, in one world. */
-  private enter(element: Element, style: Style, parent: Frame, scope: Scope): Frame {
+  private enter(element: Element, style: Style, parent: Frame, scope: Scope, world: World): Frame {
     if (parent.subtree !== null) return parent;
     const frame: Frame = { ...parent };
     const hide = (reason: HiddenReason, detail: string): Frame => ({
@@ -400,6 +484,7 @@ class Extractor {
           ? this.verdict('off-screen', element, `text-indent: ${px(indent)}`)
           : null;
     }
+    frame.color = this.colorVerdict(element, style, frame, parent, world);
     return frame;
   }
 
@@ -431,7 +516,8 @@ class Extractor {
       frame.offscreen ??
       frame.visibility ??
       frame.font ??
-      frame.indent;
+      frame.indent ??
+      frame.color;
     const first = decide(frames[0] as Frame);
     if (first !== null || frames.length === 1) return first;
     const second = decide(frames[1] as Frame);
@@ -477,7 +563,7 @@ class Extractor {
     const styles = this.worlds.map((world) => this.engine.style(element, world));
     const style = styles[0] as Style;
     const frames = this.worlds.map((world) =>
-      this.enter(element, styles[world] as Style, parentFrames[world] as Frame, scope),
+      this.enter(element, styles[world] as Style, parentFrames[world] as Frame, scope, world),
     );
     const first = frames[0] as Frame;
     const boxless = first.subtree !== null && BOXLESS[first.subtree.reason] === true;

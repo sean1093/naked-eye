@@ -21,7 +21,11 @@ export type HiddenReason =
   /** `clip` or `clip-path` that removes the whole box. */
   | 'clipped'
   /** Moved outside the page by offsets, margins, `text-indent` or translation. */
-  | 'off-screen';
+  | 'off-screen'
+  /** Drawn in a fully transparent color, with no visible stroke or shadow. */
+  | 'transparent-text'
+  /** Contrast against the background below `minContrast`, such as white on white. */
+  | 'low-contrast';
 
 export interface HiddenText {
   /** The removed text, with whitespace collapsed. */
@@ -40,6 +44,8 @@ export type WarningCode =
   | 'unsupported-selector'
   /** Rules under a condition that cannot be decided statically were evaluated both ways. */
   | 'unknown-condition'
+  /** A color the engine cannot evaluate; text drawn with it was kept. */
+  | 'unsupported-color'
   /** The document nests deeper than any real page; nothing was extracted. */
   | 'document-too-deep';
 
@@ -69,4 +75,6 @@ export interface ExtractOptions {
   minOpacity?: number;
   /** Text moved this many CSS pixels or more out of the page is hidden. Default `1000`. */
   offScreenDistance?: number;
+  /** Text whose WCAG contrast ratio against its background is below this is hidden. Default `1.5`. */
+  minContrast?: number;
 }
