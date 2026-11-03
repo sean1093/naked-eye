@@ -91,6 +91,10 @@ interface Frame {
   font: Verdict | null;
   /** A negative `text-indent` on the nearest block container. */
   indent: Verdict | null;
+  /** Moved outside the page with its ancestors; a descendant that moves back is visible again. */
+  offscreen: Verdict | null;
+  /** The parent's `perspective` distance, for 3D transforms of its children. */
+  perspective: number | null;
   opacity: number;
   scale: number;
   shiftX: number;
@@ -113,6 +117,8 @@ const ROOT_FRAME: Frame = {
   visibility: null,
   font: null,
   indent: null,
+  offscreen: null,
+  perspective: null,
   opacity: 1,
   scale: 1,
   shiftX: 0,
@@ -126,6 +132,26 @@ const CSS_IDENT = /^-?[_a-zA-Z][\w-]*$/;
 
 function createSelector(): (node: ParentNode | null) => string {
   const cache = new WeakMap<Element, string>();
+  // nth-of-type positions, computed once per parent so that many siblings stay linear.
+  const positions = new WeakMap<ParentNode, Map<Element, [number, number]>>();
+  const positionOf = (node: Element, parent: ParentNode): [number, number] => {
+    let known = positions.get(parent);
+    if (known === undefined) {
+      known = new Map();
+      const byName = new Map<string, Element[]>();
+      for (const child of parent.children) {
+        if (!isElement(child)) continue;
+        const list = byName.get(child.name);
+        if (list === undefined) byName.set(child.name, [child]);
+        else list.push(child);
+      }
+      for (const list of byName.values()) {
+        for (const [index, child] of list.entries()) known.set(child, [index + 1, list.length]);
+      }
+      positions.set(parent, known);
+    }
+    return known.get(node) ?? [1, 1];
+  };
   const selectorOf = (start: ParentNode | null): string => {
     let node: ParentNode | null = start;
     // Content of a <template> belongs to the template.
@@ -140,12 +166,8 @@ function createSelector(): (node: ParentNode | null) => string {
       selector = `#${id}`;
     } else {
       const parent = node.parent;
-      const siblings =
-        parent === null
-          ? []
-          : parent.children.filter((child) => isElement(child) && child.name === node.name);
-      const step =
-        siblings.length > 1 ? `${node.name}:nth-of-type(${siblings.indexOf(node) + 1})` : node.name;
+      const [index, total] = parent === null ? [1, 1] : positionOf(node, parent);
+      const step = total > 1 ? `${node.name}:nth-of-type(${index})` : node.name;
       // The document node ends the path; a template's content fragment continues it.
       const nested =
         parent !== null &&
@@ -295,7 +317,10 @@ class Extractor {
       if (clipPath !== null) return hide('clipped', clipPath);
     }
 
-    const matrix = sized ? transformOf(style) : null;
+    // SVG elements are transformable whatever their display; inline HTML boxes are not.
+    const matrix =
+      sized || element.namespace === SVG_NAMESPACE ? transformOf(style, parent.perspective) : null;
+    frame.perspective = style.perspective;
     frame.scale = parent.scale * style.zoom * (matrix === null ? 1 : scaleOf(matrix));
 
     if (boxed) {
@@ -340,7 +365,9 @@ class Extractor {
           Math.abs(value) >= limit
             ? `${name}${name.includes(':') ? '' : ':'} ${px(name === 'right' || name === 'bottom' ? -value : value)}`
             : `moved ${px(frame.shiftX)}, ${px(frame.shiftY)} with its ancestors`;
-        return hide('off-screen', detail);
+        frame.offscreen = parent.offscreen ?? this.verdict('off-screen', element, detail);
+      } else {
+        frame.offscreen = null;
       }
     }
 
@@ -366,8 +393,10 @@ class Extractor {
         style.display.kind === 'internal');
     if (blockContainer) {
       const indent = numeric(style.textIndent);
+      const limit = this.limits.offScreenDistance;
+      // A large positive indent is out of reach only when the root clips horizontally.
       frame.indent =
-        indent !== null && indent <= -this.limits.offScreenDistance
+        indent !== null && (indent <= -limit || (this.rootClipsX && indent >= limit))
           ? this.verdict('off-screen', element, `text-indent: ${px(indent)}`)
           : null;
     }
@@ -375,7 +404,12 @@ class Extractor {
   }
 
   private layoutOf(element: Element, style: Style, scope: Scope): Layout {
-    if (element.name === 'p') return 'paragraph';
+    const layout = this.layoutOfStyle(style, scope);
+    // innerText separates a <p> by a blank line, but only when it is block-level.
+    return element.name === 'p' && layout === 'block' ? 'paragraph' : layout;
+  }
+
+  private layoutOfStyle(style: Style, scope: Scope): Layout {
     const { display } = style;
     if (display.kind === 'internal') {
       if (display.role === 'table-row') return 'row';
@@ -392,7 +426,12 @@ class Extractor {
   private textVerdict(frames: Frame[], scope: Scope): Verdict | null {
     const graphics = scope.svgText ? null : scope.svgGraphics;
     const decide = (frame: Frame): Verdict | null =>
-      frame.subtree ?? graphics ?? frame.visibility ?? frame.font ?? frame.indent;
+      frame.subtree ??
+      graphics ??
+      frame.offscreen ??
+      frame.visibility ??
+      frame.font ??
+      frame.indent;
     const first = decide(frames[0] as Frame);
     if (first !== null || frames.length === 1) return first;
     const second = decide(frames[1] as Frame);

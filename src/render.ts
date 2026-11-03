@@ -86,7 +86,8 @@ class Builder {
     }
     if (value === '') return;
     this.flush();
-    this.out += value;
+    // preserve-spaces keeps spaces and tabs but turns segment breaks into spaces.
+    this.out += space === 'preserve-spaces' ? value.replace(/\r\n|[\n\r\f]/g, ' ') : value;
   }
 
   result(): string {

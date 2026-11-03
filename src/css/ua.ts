@@ -8,6 +8,8 @@
  * Scripting is assumed enabled, as in a browser that a human uses, so
  * `<noscript>` content does not render.
  */
+import { type Declaration, parseComponentValues } from './syntax.js';
+
 export const UA_STYLESHEET = `
 [hidden]:not([hidden="until-found" i]):not(embed) { display: none; }
 [hidden="until-found" i]:not(embed) { content-visibility: hidden; }
@@ -69,22 +71,94 @@ const LEGACY_FONT_SIZES = [
   'xxx-large',
 ];
 
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+
+/** SVG presentation attributes that map to modeled properties. */
+const SVG_PRESENTATION = ['opacity', 'visibility', 'display', 'font-size', 'clip-path'];
+
+/** Units the SVG `transform` attribute leaves implicit: user units are px, angles are degrees. */
+const SVG_TRANSFORM_UNITS: Record<string, string[]> = {
+  translate: ['px', 'px'],
+  scale: ['', ''],
+  rotate: ['deg'],
+  skewx: ['deg'],
+  skewy: ['deg'],
+  matrix: ['', '', '', '', '', ''],
+};
+
 /**
- * Presentational hints: HTML attributes that map to CSS, applied below every
- * author rule. Returned as CSS declaration text.
+ * The SVG `transform` attribute as a CSS `transform` value: numbers without
+ * units, separated by spaces or commas. `rotate(a, cx, cy)` keeps its angle.
  */
-export function presentationalHints(name: string, attributes: Record<string, string>): string {
-  const hints: string[] = [];
-  if (name === 'font' && attributes.size !== undefined) {
-    const match = /^\s*([+-]?)(\d+)/.exec(attributes.size);
+function svgTransform(value: string): string | null {
+  const functions: string[] = [];
+  const pattern = /\s*([a-zA-Z]+)\s*\(([^)]*)\)\s*,?/gy;
+  let match: RegExpExecArray | null = pattern.exec(value);
+  let consumed = 0;
+  while (match !== null) {
+    consumed = pattern.lastIndex;
+    const name = (match[1] as string).toLowerCase();
+    const units = SVG_TRANSFORM_UNITS[name];
+    const numbers = (match[2] as string)
+      .trim()
+      .split(/[\s,]+/)
+      .filter((part) => part !== '');
+    if (
+      units === undefined ||
+      numbers.length === 0 ||
+      numbers.some((part) => !/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(part))
+    )
+      return null;
+    const used = name === 'rotate' ? numbers.slice(0, 1) : numbers;
+    if (used.length > units.length || (name === 'matrix' && used.length !== 6)) return null;
+    functions.push(
+      `${name}(${used.map((part, index) => `${part}${units[index] ?? ''}`).join(', ')})`,
+    );
+    match = pattern.exec(value);
+  }
+  return functions.length === 0 || value.slice(consumed).trim() !== '' ? null : functions.join(' ');
+}
+
+interface HintTarget {
+  name: string;
+  namespace?: string | undefined;
+  attribs: Record<string, string>;
+}
+
+/**
+ * Presentational hints: HTML and SVG attributes that map to CSS, applied
+ * below every author rule. Attribute values are attacker-controlled, so each
+ * one becomes exactly one declaration: `display="none; x: y"` is an invalid
+ * display, never a second declaration.
+ */
+export function presentationalHints({ name, namespace, attribs }: HintTarget): Declaration[] {
+  const hints: Declaration[] = [];
+  const add = (property: string, css: string): void => {
+    hints.push({ name: property, value: parseComponentValues(css), important: false });
+  };
+  if (namespace === SVG_NAMESPACE) {
+    for (const property of SVG_PRESENTATION) {
+      const value = attribs[property];
+      if (value === undefined) continue;
+      const unitless = property === 'font-size' && /^\s*[+-]?(\d+\.?\d*|\.\d+)\s*$/.test(value);
+      add(property, unitless ? `${value.trim()}px` : value);
+    }
+    if (attribs.transform !== undefined) {
+      const transform = svgTransform(attribs.transform);
+      if (transform !== null) add('transform', transform);
+    }
+    return hints;
+  }
+  if (name === 'font' && attribs.size !== undefined) {
+    const match = /^\s*([+-]?)(\d+)/.exec(attribs.size);
     if (match !== null) {
       const value = Number(match[2]);
       const size = match[1] === '+' ? 3 + value : match[1] === '-' ? 3 - value : value;
-      hints.push(`font-size: ${LEGACY_FONT_SIZES[Math.min(7, Math.max(1, size)) - 1]}`);
+      add('font-size', LEGACY_FONT_SIZES[Math.min(7, Math.max(1, size)) - 1] as string);
     }
   }
-  if ((name === 'td' || name === 'th') && attributes.nowrap !== undefined)
-    hints.push('white-space: nowrap');
-  if (name === 'pre' && attributes.wrap !== undefined) hints.push('white-space: pre-wrap');
-  return hints.join(';');
+  if ((name === 'td' || name === 'th') && attribs.nowrap !== undefined)
+    add('white-space', 'nowrap');
+  if (name === 'pre' && attribs.wrap !== undefined) add('white-space', 'pre-wrap');
+  return hints;
 }

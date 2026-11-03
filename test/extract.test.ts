@@ -112,6 +112,15 @@ describe('extractVisible', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it('builds finding selectors in time linear in the number of siblings', () => {
+    const started = Date.now();
+    const { hidden } = extractVisible(
+      documentOf('<span style="display: none">x</span>'.repeat(20_000)),
+    );
+    expect(hidden).toHaveLength(20_000);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   it('handles fragments and empty input', () => {
     expect(extractVisible('').text).toBe('');
     expect(extractVisible('plain <b>text</b>').text).toBe('plain text');

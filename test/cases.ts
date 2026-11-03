@@ -345,6 +345,55 @@ export const cases: Case[] = [
     visible: 'reachable',
   },
 
+  {
+    name: 'SVG presentation attributes',
+    html: '<svg><text display="none">a</text><text visibility="hidden">b</text><text opacity="0">c</text><text font-size="0">d</text><g transform="translate(-9999,0)"><text>e</text></g><text font-size="20">kept</text></svg>',
+    visible: 'kept',
+    hidden: [
+      ['display-none', 'a'],
+      ['visibility-hidden', 'b'],
+      ['opacity', 'c'],
+      ['font-size', 'd'],
+      ['off-screen', 'e'],
+    ],
+  },
+  {
+    name: 'rotations and perspective in three dimensions',
+    html: '<p style="transform: rotate3d(1, 0, 0, 90deg)">a</p><p style="transform: perspective(1px) translateZ(-10000px)">b</p><div style="perspective: 10px"><p style="transform: translateZ(-100000px)">c</p></div><p style="transform: rotate3d(0, 0, 1, 45deg)">kept</p>',
+    visible: 'kept',
+    hidden: [
+      ['font-size', 'a'],
+      ['font-size', 'b'],
+      ['font-size', 'c'],
+    ],
+  },
+  {
+    name: 'a large positive indent on a page that clips horizontally',
+    html: '<style>html { overflow-x: hidden }</style><p style="text-indent: 9999px">secret</p>keep',
+    visible: 'keep',
+    hidden: [['off-screen', 'secret']],
+  },
+  {
+    name: 'padding and minimum sizes keep a zero-height box open',
+    html: '<div style="height: 0; padding: 40px 0; overflow: hidden">padded</div><div style="height: 0; padding-bottom: 56.25%; overflow: hidden">ratio</div><div style="height: 0; min-height: 60px; overflow: hidden">minimum</div><div style="min-width: 300px; max-width: 0; overflow: hidden">wide</div>',
+    visible: 'padded\nratio\nminimum\nwide',
+  },
+  {
+    name: 'paragraph breaks follow display, not the tag',
+    html: '<p style="display: inline">a</p><p style="display: inline">b</p>',
+    visible: 'ab',
+  },
+  {
+    name: 'a descendant moved back on screen',
+    html: '<div style="margin-left: -9999px"><div style="margin-left: 9999px">back on screen</div></div>',
+    visible: 'back on screen',
+  },
+  {
+    name: 'preserve-spaces collapses line breaks into spaces',
+    html: '<div style="white-space-collapse: preserve-spaces">a  b\nc</div>',
+    visible: 'a  b c',
+  },
+
   // The cascade is followed wherever it leads.
   {
     name: 'hiding reached through a layer, nesting and a custom property',

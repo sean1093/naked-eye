@@ -43,6 +43,29 @@ function matrixOf({ name, args }: ResolvedTransform): Affine {
     case 'translate':
     case 'translate3d':
       return { ...IDENTITY, e: known(x, 0), f: known(y, 0) };
+    case 'rotate3d': {
+      // Rodrigues' rotation about a unit axis, projected onto the screen plane.
+      const [ax, ay, az, angle] = args.map((value) => known(value, 0)) as [
+        number,
+        number,
+        number,
+        number,
+      ];
+      const length = Math.hypot(ax, ay, az);
+      if (length === 0) return IDENTITY;
+      const [ux, uy, uz] = [ax / length, ay / length, az / length];
+      const cos = Math.cos(radians(angle));
+      const sin = Math.sin(radians(angle));
+      const t = 1 - cos;
+      return {
+        a: t * ux * ux + cos,
+        b: t * ux * uy + sin * uz,
+        c: t * ux * uy - sin * uz,
+        d: t * uy * uy + cos,
+        e: 0,
+        f: 0,
+      };
+    }
     case 'translatex':
       return { ...IDENTITY, e: known(x, 0) };
     case 'translatey':
@@ -105,9 +128,34 @@ function matrixOf({ name, args }: ResolvedTransform): Affine {
   }
 }
 
-/** The element's own transform, functions applied left to right. */
-export function transformOf(style: Style): Affine {
-  return style.transform.reduce((matrix, fn) => multiply(matrix, matrixOf(fn)), IDENTITY);
+/**
+ * The element's own transform, functions applied left to right, projected to
+ * the screen. A translation along z under perspective (a `perspective()`
+ * function earlier in the list, or the parent's `perspective` property)
+ * scales by p / (p - z), and a box at or behind the viewer is not drawn.
+ */
+export function transformOf(style: Style, parentPerspective: number | null = null): Affine {
+  let perspective = parentPerspective;
+  let matrix = IDENTITY;
+  for (const fn of style.transform) {
+    if (fn.name === 'perspective') {
+      const distance = known(fn.args[0], 0);
+      perspective = distance > 0 ? distance : null;
+      continue;
+    }
+    matrix = multiply(matrix, matrixOf(fn));
+    const z =
+      fn.name === 'translatez'
+        ? known(fn.args[0], 0)
+        : fn.name === 'translate3d'
+          ? known(fn.args[2], 0)
+          : 0;
+    if (z !== 0 && perspective !== null) {
+      const factor = perspective - z <= 0 ? 0 : perspective / (perspective - z);
+      matrix = multiply(matrix, { ...IDENTITY, a: factor, d: factor });
+    }
+  }
+  return matrix;
 }
 
 /**
@@ -131,27 +179,51 @@ const clips = (overflow: Style['overflowX']): boolean => overflow !== 'visible';
 
 /**
  * A box no more than one pixel wide or tall that does not let its content
- * overflow. Size containment without an intrinsic size collapses the block
- * size, and paint containment clips like `overflow: clip`.
+ * overflow. Padding and a minimum size count: overflow clips to the padding
+ * box, so a zero height with padding still shows its content. Size
+ * containment without an intrinsic size collapses the block size, and paint
+ * containment clips like `overflow: clip`.
  */
 export function zeroSizeDetail(style: Style, blockified: boolean): string | null {
   if (!isSized(style, blockified)) return null;
-  const tiny = (value: Style['width']): boolean => typeof value === 'number' && value <= 1;
   const clipsX = clips(style.overflowX) || style.contain.paint;
   const clipsY = clips(style.overflowY) || style.contain.paint;
   const overflow = (axis: Style['overflowX']): string =>
     clips(axis) ? `overflow: ${axis}` : 'contain: paint';
-  if (clipsX && (tiny(style.width) || tiny(style.maxWidth))) {
-    const value = tiny(style.width) ? `width: ${style.width}px` : `max-width: ${style.maxWidth}px`;
+  const thin = (
+    size: Style['width'],
+    minimum: Style['minWidth'],
+    start: Style['paddingTop'],
+    end: Style['paddingTop'],
+  ): boolean =>
+    typeof size === 'number' &&
+    typeof start === 'number' &&
+    typeof end === 'number' &&
+    (minimum === 'auto' || (typeof minimum === 'number' && minimum <= 1)) &&
+    size + start + end <= 1;
+  const horizontal = (size: Style['width']): boolean =>
+    thin(size, style.minWidth, style.paddingLeft, style.paddingRight);
+  const vertical = (size: Style['width']): boolean =>
+    thin(size, style.minHeight, style.paddingTop, style.paddingBottom);
+  if (clipsX && (horizontal(style.width) || horizontal(style.maxWidth))) {
+    const value = horizontal(style.width)
+      ? `width: ${style.width}px`
+      : `max-width: ${style.maxWidth}px`;
     return `${value}; ${overflow(style.overflowX)}`;
   }
-  if (clipsY && (tiny(style.height) || tiny(style.maxHeight))) {
-    const value = tiny(style.height)
+  if (clipsY && (vertical(style.height) || vertical(style.maxHeight))) {
+    const value = vertical(style.height)
       ? `height: ${style.height}px`
       : `max-height: ${style.maxHeight}px`;
     return `${value}; ${overflow(style.overflowY)}`;
   }
-  if (clipsY && style.contain.size && style.height === 'auto' && !style.intrinsicHeight) {
+  if (
+    clipsY &&
+    style.contain.size &&
+    style.height === 'auto' &&
+    !style.intrinsicHeight &&
+    vertical(0)
+  ) {
     return `contain: size; ${overflow(style.overflowY)}`;
   }
   return null;

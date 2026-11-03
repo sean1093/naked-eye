@@ -215,6 +215,8 @@ position, subject to the same hiding rules, and lists each insertion in
 - **Attributes.** Text drawn from attributes is not extracted: form control
   values and placeholders, and image `alt` text shown when an image fails to
   load.
+- **SVG `<use>`.** Text inside a `<symbol>` or `<defs>` that a `<use>` element
+  draws elsewhere is reported as never rendered.
 
 ### Browser mode
 
