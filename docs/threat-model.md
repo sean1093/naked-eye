@@ -105,6 +105,7 @@ implements each row.
 | SVG text outside text elements | `<svg><g>text</g></svg>`, `<title>` and `<desc>` inside SVG | yes | yes | `not-rendered` | [#5][i5] |
 | The `hidden` attribute | `<p hidden>` | yes | yes | `display-none` | [#5][i5] |
 | A closed dialog | `<dialog>` without `open` | yes | yes | `display-none` | [#5][i5] |
+| A popover that is not open | an element with the `popover` attribute | yes | yes | `display-none` | [#5][i5] |
 | A closed disclosure | the body of `<details>` without `open` | yes | yes | `collapsed` | [#5][i5] |
 | A closed drop-down | the options of a `<select>` other than the selected one | yes | yes | `collapsed` | [#5][i5] |
 | Unslotted shadow host children | a light DOM child no `<slot>` accepts | yes | yes | `unslotted` | [#9][i9] |
@@ -214,6 +215,8 @@ position, subject to the same hiding rules, and lists each insertion in
 - **Attributes.** Text drawn from attributes is not extracted: form control
   values and placeholders, and image `alt` text shown when an image fails to
   load.
+- **SVG `<use>`.** Text inside a `<symbol>` or `<defs>` that a `<use>` element
+  draws elsewhere is reported as never rendered.
 
 ### Browser mode
 

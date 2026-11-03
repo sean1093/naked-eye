@@ -82,6 +82,14 @@ export interface Values {
   contain: { size: boolean; paint: boolean };
   /** Whether `contain-intrinsic-*` gives the box a block size other than nothing. */
   'contain-intrinsic-height': boolean;
+  'min-width': Size;
+  'min-height': Size;
+  'padding-top': Expr;
+  'padding-right': Expr;
+  'padding-bottom': Expr;
+  'padding-left': Expr;
+  /** The `perspective` property: the distance children's 3D transforms are viewed from. */
+  perspective: Expr | 'none';
 }
 
 export type Longhand = keyof Values;
@@ -804,6 +812,36 @@ export const LONGHANDS: Definitions = {
   },
   contain: { inherited: false, initial: { size: false, paint: false }, parse: parseContain },
   'contain-intrinsic-height': { inherited: false, initial: false, parse: parseIntrinsicSize },
+  'min-width': { inherited: false, initial: 'auto', parse: parseSize('auto') },
+  'min-height': { inherited: false, initial: 'auto', parse: parseSize('auto') },
+  'padding-top': {
+    inherited: false,
+    initial: ZERO,
+    parse: (nodes, quirks) => lengthPercentage(single(nodes) ?? undefined, quirks, true),
+  },
+  'padding-right': {
+    inherited: false,
+    initial: ZERO,
+    parse: (nodes, quirks) => lengthPercentage(single(nodes) ?? undefined, quirks, true),
+  },
+  'padding-bottom': {
+    inherited: false,
+    initial: ZERO,
+    parse: (nodes, quirks) => lengthPercentage(single(nodes) ?? undefined, quirks, true),
+  },
+  'padding-left': {
+    inherited: false,
+    initial: ZERO,
+    parse: (nodes, quirks) => lengthPercentage(single(nodes) ?? undefined, quirks, true),
+  },
+  perspective: {
+    inherited: false,
+    initial: 'none',
+    parse: (nodes) =>
+      identOf(single(nodes) ?? undefined) === 'none'
+        ? 'none'
+        : lengthPercentage(single(nodes) ?? undefined, false, true),
+  },
 };
 
 const CONTAINMENT = ['size', 'inline-size', 'layout', 'style', 'paint'];
@@ -835,6 +873,12 @@ function parseIntrinsicSize(nodes: ComponentValue[]): boolean | null {
 
 /** Properties whose unitless lengths are px in quirks mode. */
 const QUIRKY: Record<string, true> = {
+  'min-width': true,
+  'min-height': true,
+  'padding-top': true,
+  'padding-right': true,
+  'padding-bottom': true,
+  'padding-left': true,
   'font-size': true,
   width: true,
   height: true,
@@ -929,6 +973,34 @@ export const SHORTHANDS: Record<
     return nodes.length === 0 ? null : { 'text-wrap-mode': mode ?? 'wrap' };
   },
   animation: (nodes) => parseAnimation(nodes),
+  padding: (nodes, quirks) => {
+    if (nodes.length === 0 || nodes.length > 4) return null;
+    const values = nodes.map((node) => lengthPercentage(node, quirks, true));
+    if (values.includes(null)) return null;
+    const [top, right = top, bottom = top, left = right] = values as Expr[];
+    return {
+      'padding-top': top,
+      'padding-right': right,
+      'padding-bottom': bottom,
+      'padding-left': left,
+    } as Partial<Values>;
+  },
+  'padding-block': (nodes, quirks) => {
+    const values = nodes.map((node) => lengthPercentage(node, quirks, true));
+    if (values.length === 0 || values.length > 2 || values.includes(null)) return null;
+    return {
+      'padding-top': values[0],
+      'padding-bottom': values[1] ?? values[0],
+    } as Partial<Values>;
+  },
+  'padding-inline': (nodes, quirks) => {
+    const values = nodes.map((node) => lengthPercentage(node, quirks, true));
+    if (values.length === 0 || values.length > 2 || values.includes(null)) return null;
+    return {
+      'padding-left': values[0],
+      'padding-right': values[1] ?? values[0],
+    } as Partial<Values>;
+  },
   'contain-intrinsic-size': (nodes) => {
     // One or two of `none`, `<length>` or `auto <length>`: width, then height.
     const groups: ComponentValue[][] = [];
@@ -966,6 +1038,12 @@ const ALIASES: Record<string, string> = {
   'max-inline-size': 'max-width',
   'max-block-size': 'max-height',
   'contain-intrinsic-block-size': 'contain-intrinsic-height',
+  'min-inline-size': 'min-width',
+  'min-block-size': 'min-height',
+  'padding-block-start': 'padding-top',
+  'padding-block-end': 'padding-bottom',
+  'padding-inline-start': 'padding-left',
+  'padding-inline-end': 'padding-right',
 };
 
 /**
@@ -1037,6 +1115,12 @@ export function longhandsOf(alias: string): Longhand[] {
       return ['text-wrap-mode'];
     case 'contain-intrinsic-size':
       return ['contain-intrinsic-height'];
+    case 'padding':
+      return ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'];
+    case 'padding-block':
+      return ['padding-top', 'padding-bottom'];
+    case 'padding-inline':
+      return ['padding-left', 'padding-right'];
     case 'animation':
       return [
         'animation-name',

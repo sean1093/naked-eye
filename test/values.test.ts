@@ -44,7 +44,8 @@ describe('math functions', () => {
 
   it('cannot resolve a percentage of an unknown size', () => {
     expect(marginLeft('-100%')).toBe('unknown');
-    expect(marginLeft('calc(50% - 50%)')).toBe('unknown');
+    expect(marginLeft('calc(50% - 40%)')).toBe('unknown');
+    expect(marginLeft('calc(50% - 50%)')).toBe(0);
     expect(marginLeft('max(10px, 50%)')).toBe('unknown');
   });
 });

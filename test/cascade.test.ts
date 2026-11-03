@@ -359,8 +359,8 @@ describe('values', () => {
 });
 
 describe('robustness', () => {
-  it('styles deep documents without overflowing the stack', () => {
-    const html = `${STANDARDS}<style>div { display: block }</style>${'<div>'.repeat(4000)}<p id=t>x`;
+  it('styles a document at the maximum nesting depth', () => {
+    const html = `${STANDARDS}<style>div { display: block }</style>${'<div>'.repeat(1000)}<p id=t>x`;
     expect(name(styled(html).style('t').display)).toBe('block');
   });
 

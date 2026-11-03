@@ -12,6 +12,7 @@ import type { ComponentValue } from '@csstools/css-parser-algorithms';
 import { isFunctionNode } from '@csstools/css-parser-algorithms';
 import { TokenType } from '@csstools/css-tokenizer';
 import type { AnyNode, Document, Element } from 'domhandler';
+import type { Warning, WarningCode } from '../types.js';
 import { own } from '../util.js';
 import {
   type Context,
@@ -68,13 +69,6 @@ import {
 } from './syntax.js';
 import { presentationalHints, UA_STYLESHEET } from './ua.js';
 
-export type WarningCode = 'unresolved-stylesheet' | 'unsupported-selector' | 'unknown-condition';
-
-export interface Warning {
-  code: WarningCode;
-  message: string;
-}
-
 export interface StyleOptions {
   environment: Environment;
   /** CSS text for `<link rel="stylesheet">` and `@import`, keyed by the URL as written. */
@@ -122,6 +116,14 @@ export interface Style {
   contain: Values['contain'];
   /** A `contain-intrinsic-*` block size, which keeps a size-contained box from collapsing. */
   intrinsicHeight: boolean;
+  minWidth: Length | 'intrinsic';
+  minHeight: Length | 'intrinsic';
+  paddingTop: Length;
+  paddingRight: Length;
+  paddingBottom: Length;
+  paddingLeft: Length;
+  /** The `perspective` distance in px for children's 3D transforms, or `null`. */
+  perspective: number | null;
 }
 
 export interface StyleEngine {
@@ -315,6 +317,13 @@ const INITIAL_STYLE: Style = {
   textWrapMode: 'wrap',
   contain: { size: false, paint: false },
   intrinsicHeight: false,
+  minWidth: 'auto',
+  minHeight: 'auto',
+  paddingTop: 0,
+  paddingRight: 0,
+  paddingBottom: 0,
+  paddingLeft: 0,
+  perspective: null,
 };
 
 function elementChildren(node: { children: AnyNode[] }): Element[] {
@@ -808,11 +817,11 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       }
     }
     const list = [...found].map(([block, specificity]) => ({ block, specificity }));
-    const hints = presentationalHints(element.name, element.attribs);
-    if (hints !== '') {
+    const hints = presentationalHints(element);
+    if (hints.length > 0) {
       list.push({
         block: {
-          declarations: toDeclarations(parseStyleAttribute(hints)),
+          declarations: toDeclarations(hints),
           layer: hintLayer,
           conditional: false,
           order: -1,
@@ -1285,6 +1294,37 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     style.marginTop = offset('margin-top', 0, parentStyle.marginTop);
     style.textIndent = offset('text-indent', 0, parentStyle.textIndent);
     style.contain = plain('contain', parentStyle.contain, INITIAL_STYLE.contain);
+    const minimum = (
+      property: 'min-width' | 'min-height',
+      inherited: Style['minWidth'],
+    ): Style['minWidth'] => {
+      const value = specified(property);
+      if (value === 'inherit') return inherited;
+      if (value === 'initial' || value === 'auto' || value === 'none') return 'auto';
+      if (value === 'intrinsic') return 'intrinsic';
+      return resolveLength(value, ctx) ?? 'auto';
+    };
+    style.minWidth = minimum('min-width', parentStyle.minWidth);
+    style.minHeight = minimum('min-height', parentStyle.minHeight);
+    const padding = (
+      property: 'padding-top' | 'padding-right' | 'padding-bottom' | 'padding-left',
+      inherited: Length,
+    ): Length => {
+      const value = specified(property);
+      if (value === 'inherit') return inherited;
+      if (value === 'initial') return 0;
+      return resolveLength(value, ctx) ?? 0;
+    };
+    style.paddingTop = padding('padding-top', parentStyle.paddingTop);
+    style.paddingRight = padding('padding-right', parentStyle.paddingRight);
+    style.paddingBottom = padding('padding-bottom', parentStyle.paddingBottom);
+    style.paddingLeft = padding('padding-left', parentStyle.paddingLeft);
+    const perspective = specified('perspective');
+    if (perspective === 'inherit') style.perspective = parentStyle.perspective;
+    else if (perspective !== 'initial' && perspective !== 'none') {
+      const distance = resolveLength(perspective, ctx);
+      style.perspective = typeof distance === 'number' && distance > 0 ? distance : null;
+    }
     style.intrinsicHeight = plain('contain-intrinsic-height', parentStyle.intrinsicHeight, false);
 
     const computed: Computed = { style, custom };

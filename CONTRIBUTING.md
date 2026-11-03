@@ -72,9 +72,10 @@ at the rendered page cannot see.
 1. Check the [threat model's catalogue](docs/threat-model.md#hiding-techniques).
    If the technique is listed as covered and text still gets through, stop
    here: that is a vulnerability, so report it privately.
-2. Write a failing test: the smallest HTML document that uses the technique,
-   the visible text you expect, and the reason code you expect for the removed
-   text.
+2. Write a failing test: add a case to the shared corpus in `test/cases.ts`
+   with the smallest HTML document that uses the technique, the visible text
+   you expect, and the reason code you expect for the removed text. Static mode
+   and browser mode both run every case.
 3. Add the opposite case: the same markup without the hiding declaration keeps
    its text. That is what stops a rule from quietly removing visible content.
 4. Make both pass, in static mode and, where the browser can tell, in browser
