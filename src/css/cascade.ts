@@ -834,7 +834,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
         else if (media !== null) addSheet(sheetRules(href, css), media, 1, new Set([href]));
       }
     }
-    stack.push(...[...node.children].reverse());
+    for (let index = node.children.length - 1; index >= 0; index -= 1)
+      stack.push(node.children[index] as AnyNode);
   }
   const ranks = { next: 0 };
   const assignRanks = (layer: Layer): void => {
@@ -1123,7 +1124,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
         origin: 'animation',
       };
       for (const frame of frames) {
-        if (frame.offsets.includes(offset)) block.declarations.push(...frame.declarations);
+        if (frame.offsets.includes(offset))
+          for (const declaration of frame.declarations) block.declarations.push(declaration);
       }
       out.push(
         block.declarations.map((decl, at) => ({
@@ -1474,7 +1476,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     const element = queue[cursor] as Element;
     compute(element, 0);
     if (conditionalRules) compute(element, 1);
-    if (element.name !== 'template') queue.push(...elementChildren(element));
+    if (element.name !== 'template')
+      for (const child of elementChildren(element)) queue.push(child);
   }
 
   return {

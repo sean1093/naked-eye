@@ -166,10 +166,16 @@ containing block, so such text is kept when it contrasts with that box too.
 |---|---|---|---|---|---|
 | Unicode tag characters | an ASCII prompt mapped to U+E0000–U+E007F | yes | yes | `invisible-unicode` | [#7][i7] |
 | Variation selector smuggling | bytes encoded as a run of variation selectors after one emoji | yes | yes | `invisible-unicode` | [#7][i7] |
-| Zero-width and bidirectional controls | U+200B, U+2060, U+202E | yes | yes | `invisible-unicode` | [#7][i7] |
+| Zero-width and bidirectional controls | U+200B, U+2060, U+202E, and every other default-ignorable code point | yes | yes | `invisible-unicode` | [#7][i7] |
 
 Findings for tag characters and variation-selector runs carry the decoded
-payload, so a log shows what the attacker tried to say.
+payload, so a log shows what the attacker tried to say. ZWJ and ZWNJ are kept
+only between two characters they join: emoji sequences, and letters of the
+Arabic-script and Indic scripts whose shaping they control, also across inline
+markup. A lone U+FE0E or U+FE0F is kept only after a character with an emoji
+presentation. A single selector that picks a glyph variant (an ideographic
+variation sequence, a standardized variant, a Mongolian free variation
+selector) is typography: it is removed without a finding, like a soft hyphen.
 
 ## The reverse mismatch
 

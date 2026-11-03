@@ -96,7 +96,8 @@ export function parseStylesheet(css: string): Rule[] {
 export function parseStyleAttribute(css: string): Declaration[] {
   const declarations: Declaration[] = [];
   for (const item of parseBlockContents(parseComponentValues(css))) {
-    if (item.kind === 'declarations') declarations.push(...item.declarations);
+    if (item.kind === 'declarations')
+      for (const declaration of item.declarations) declarations.push(declaration);
   }
   return declarations;
 }

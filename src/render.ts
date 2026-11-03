@@ -5,6 +5,7 @@
  * the two modes return the same text for the same rendering.
  */
 import type { HiddenReason, HiddenText } from './types.js';
+import { MAY_CONTAIN_INVISIBLE, type Removal, stripInvisible } from './unicode.js';
 
 /** How white space in a text run is processed (CSS `white-space-collapse`). */
 export type Space =
@@ -27,7 +28,8 @@ export interface Verdict {
 }
 
 export type RenderNode =
-  | { kind: 'text'; text: string; space: Space; hidden: Verdict | null }
+  /** `origin` names the element a visible text belongs to, for findings about invisible characters in it. */
+  | { kind: 'text'; text: string; space: Space; hidden: Verdict | null; origin?: string }
   | { kind: 'break' }
   | { kind: 'box'; layout: Layout; children: RenderNode[] };
 
@@ -100,10 +102,38 @@ export function squash(text: string): string {
   return text.replace(COLLAPSIBLE, ' ').trim();
 }
 
+/** What each kind of removal is called, for one and for several. */
+const INVISIBLE_DETAIL: Record<Removal['kind'], [string, string]> = {
+  tag: ['Unicode tag character', 'Unicode tag characters'],
+  'variation-selector': ['variation selector', 'variation selectors'],
+  'zero-width': ['zero-width character', 'zero-width characters'],
+  bidi: ['bidirectional control', 'bidirectional controls'],
+};
+
 /** Turns render trees into the visible text and the hidden findings, in document order. */
 export function assemble(roots: readonly RenderNode[]): { text: string; hidden: HiddenText[] } {
   const builder = new Builder();
   const findings = new Map<string, HiddenText>();
+  const report = (text: string, { reason, selector, detail }: Verdict): void => {
+    if (text === '') return;
+    const key = `${selector}\u0000${reason}\u0000${detail}`;
+    const existing = findings.get(key);
+    if (existing === undefined) findings.set(key, { text, reason, selector, detail });
+    else existing.text += ` ${text}`;
+  };
+
+  // A joiner or selector at the edge of a text node is judged by the visible text around it.
+  const visible: Extract<RenderNode, { kind: 'text' }>[] = [];
+  const collect = (node: RenderNode): void => {
+    if (node.kind === 'text') {
+      if (node.hidden === null) visible.push(node);
+    } else if (node.kind === 'box') {
+      for (const child of node.children) collect(child);
+    }
+  };
+  for (const root of roots) collect(root);
+  let cursor = 0;
+  let last: number | undefined;
 
   const visit = (node: RenderNode, cellIndex: number): void => {
     if (node.kind === 'break') {
@@ -112,16 +142,29 @@ export function assemble(roots: readonly RenderNode[]): { text: string; hidden: 
     }
     if (node.kind === 'text') {
       if (node.hidden === null) {
-        builder.text(node.text, node.space);
+        cursor += 1;
+        let { text } = node;
+        if (MAY_CONTAIN_INVISIBLE.test(text)) {
+          const stripped = stripInvisible(text, last, visible[cursor]?.text.codePointAt(0));
+          text = stripped.text;
+          for (const removal of stripped.removals) {
+            const [one, many] = INVISIBLE_DETAIL[removal.kind];
+            report(squash(removal.text), {
+              reason: 'invisible-unicode',
+              selector: node.origin ?? ':root',
+              detail: `${removal.count} ${removal.count === 1 ? one : many}`,
+            });
+          }
+        }
+        if (text !== '') {
+          const end = text.length - 1;
+          const unit = text.charCodeAt(end);
+          last = unit >= 0xdc00 && unit <= 0xdfff && end > 0 ? text.codePointAt(end - 1) : unit;
+        }
+        builder.text(text, node.space);
         return;
       }
-      const text = squash(node.text);
-      if (text === '') return;
-      const { reason, selector, detail } = node.hidden;
-      const key = `${selector}\u0000${reason}\u0000${detail}`;
-      const existing = findings.get(key);
-      if (existing === undefined) findings.set(key, { text, reason, selector, detail });
-      else existing.text += ` ${text}`;
+      report(squash(node.text), node.hidden);
       return;
     }
     const { layout, children } = node;

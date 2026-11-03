@@ -9,6 +9,7 @@ import { contrast, over, type RGBA, toHex } from './css/color.js';
 import { DepthExceededError, parseHtml } from './dom.js';
 import { assemble, type Layout, type RenderNode, type Space, type Verdict } from './render.js';
 import type { ExtractOptions, ExtractResult, HiddenReason } from './types.js';
+import { MAY_CONTAIN_INVISIBLE } from './unicode.js';
 import { own } from './util.js';
 import {
   clipDetail,
@@ -208,7 +209,10 @@ function shownOption(select: Element): Element | undefined {
     const node = stack.pop() as AnyNode;
     if (!isElement(node)) continue;
     if (node.name === 'option') options.push(node);
-    else if (node.name === 'optgroup') stack.push(...[...node.children].reverse());
+    else if (node.name === 'optgroup') {
+      for (let index = node.children.length - 1; index >= 0; index -= 1)
+        stack.push(node.children[index] as AnyNode);
+    }
   }
   const selected = options.filter((option) => option.attribs.selected !== undefined);
   return (
@@ -693,11 +697,20 @@ class Extractor {
       }
       if (node.type === 'text') {
         if ((frames[0] as Frame).silent) continue;
-        out.push({ kind: 'text', text: node.data, space, hidden: this.textVerdict(frames, scope) });
+        const hidden = this.textVerdict(frames, scope);
+        const origin =
+          hidden === null && MAY_CONTAIN_INVISIBLE.test(node.data)
+            ? this.selectorOf(node.parent)
+            : undefined;
+        out.push(
+          origin === undefined
+            ? { kind: 'text', text: node.data, space, hidden }
+            : { kind: 'text', text: node.data, space, hidden, origin },
+        );
         continue;
       }
       if (node.type === 'root') {
-        out.push(...this.build(node.children, frames, scope, parentStyle));
+        for (const child of this.build(node.children, frames, scope, parentStyle)) out.push(child);
         continue;
       }
       if (!isElement(node)) continue;
