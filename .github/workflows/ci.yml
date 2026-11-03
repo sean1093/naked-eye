@@ -132,3 +132,11 @@ jobs:
         run: npm test
         env:
           NAKED_EYE_BROWSERS: ${{ matrix.browser }}
+
+      # The README's examples import the package by name, so they resolve to the
+      # built dist/ exactly as an installed copy would.
+      - name: Run the examples against the built package
+        if: matrix.browser == 'chromium'
+        run: |
+          npm run build
+          npm run examples
