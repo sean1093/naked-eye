@@ -40,6 +40,7 @@ npm test
 | `npm run check:exports` | Packs the package and validates its entry points with attw and publint. |
 | `npm run size` | Checks the bundle-size budget of the built entry points, dependencies included. |
 | `npm run check:docs` | Checks links, anchors and code fences in the documentation, offline. |
+| `npm run examples` | Runs the examples in `examples/` against the built package; the second needs Playwright's Chromium. |
 
 ## Project layout
 
@@ -47,7 +48,8 @@ npm test
 src/        library source
 test/       Vitest suites
 docs/       the threat model and reference documentation
-scripts/    repository tooling: the documentation gate
+scripts/    repository tooling: the documentation gate and the page-script bundler
+examples/   runnable examples, run in CI against the built package
 .github/    CI workflows, issue forms and the pull request template
 ```
 

@@ -53,6 +53,7 @@
     "check:exports": "attw --pack . --profile node16 && publint",
     "size": "size-limit",
     "check:docs": "node scripts/check-docs.mjs",
+    "examples": "node examples/clean-for-rag.mjs && node examples/playwright-agent.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
