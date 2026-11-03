@@ -169,7 +169,10 @@ containing block, so such text is kept when it contrasts with that box too.
 | Zero-width and bidirectional controls | U+200B, U+2060, U+202E | yes | yes | `invisible-unicode` | [#7][i7] |
 
 Findings for tag characters and variation-selector runs carry the decoded
-payload, so a log shows what the attacker tried to say.
+payload, so a log shows what the attacker tried to say. ZWJ and ZWNJ are kept
+only between two characters they can join (emoji sequences, Indic and Persian
+text), so they cannot carry a binary message between Latin letters. Soft hyphens
+are typography and are removed without a finding.
 
 ## The reverse mismatch
 

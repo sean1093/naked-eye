@@ -157,6 +157,26 @@ describe('extractVisible', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it('removes soft hyphens without reporting them', () => {
+    expect(extractVisible(documentOf('<p>co&shy;operate</p>'))).toEqual({
+      text: 'cooperate',
+      hidden: [],
+      warnings: [],
+    });
+  });
+
+  it('reports invisible characters against the element that holds them', () => {
+    const { hidden } = extractVisible(documentOf('<div id="note">ok\u200B</div>'));
+    expect(hidden).toEqual([
+      {
+        text: 'U+200B',
+        reason: 'invisible-unicode',
+        selector: '#note',
+        detail: '1 zero-width characters',
+      },
+    ]);
+  });
+
   it('handles fragments and empty input', () => {
     expect(extractVisible('').text).toBe('');
     expect(extractVisible('plain <b>text</b>').text).toBe('plain text');

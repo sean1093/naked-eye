@@ -9,6 +9,7 @@ import { contrast, over, type RGBA, toHex } from './css/color.js';
 import { DepthExceededError, parseHtml } from './dom.js';
 import { assemble, type Layout, type RenderNode, type Space, type Verdict } from './render.js';
 import type { ExtractOptions, ExtractResult, HiddenReason } from './types.js';
+import { MAY_CONTAIN_INVISIBLE } from './unicode.js';
 import { own } from './util.js';
 import {
   clipDetail,
@@ -693,7 +694,16 @@ class Extractor {
       }
       if (node.type === 'text') {
         if ((frames[0] as Frame).silent) continue;
-        out.push({ kind: 'text', text: node.data, space, hidden: this.textVerdict(frames, scope) });
+        const hidden = this.textVerdict(frames, scope);
+        const origin =
+          hidden === null && MAY_CONTAIN_INVISIBLE.test(node.data)
+            ? this.selectorOf(node.parent)
+            : undefined;
+        out.push(
+          origin === undefined
+            ? { kind: 'text', text: node.data, space, hidden }
+            : { kind: 'text', text: node.data, space, hidden, origin },
+        );
         continue;
       }
       if (node.type === 'root') {

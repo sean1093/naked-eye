@@ -25,7 +25,9 @@ export type HiddenReason =
   /** Drawn in a fully transparent color, with no visible stroke or shadow. */
   | 'transparent-text'
   /** Contrast against the background below `minContrast`, such as white on white. */
-  | 'low-contrast';
+  | 'low-contrast'
+  /** Characters that render as nothing: tag characters, variation-selector runs, zero-width and bidirectional controls. */
+  | 'invisible-unicode';
 
 export interface HiddenText {
   /** The removed text, with whitespace collapsed. */

@@ -5,6 +5,7 @@
  * the two modes return the same text for the same rendering.
  */
 import type { HiddenReason, HiddenText } from './types.js';
+import { MAY_CONTAIN_INVISIBLE, type Removal, stripInvisible } from './unicode.js';
 
 /** How white space in a text run is processed (CSS `white-space-collapse`). */
 export type Space =
@@ -27,7 +28,8 @@ export interface Verdict {
 }
 
 export type RenderNode =
-  | { kind: 'text'; text: string; space: Space; hidden: Verdict | null }
+  /** `origin` names the element a visible text belongs to, for findings about invisible characters in it. */
+  | { kind: 'text'; text: string; space: Space; hidden: Verdict | null; origin?: string }
   | { kind: 'break' }
   | { kind: 'box'; layout: Layout; children: RenderNode[] };
 
@@ -100,10 +102,24 @@ export function squash(text: string): string {
   return text.replace(COLLAPSIBLE, ' ').trim();
 }
 
+const INVISIBLE_DETAIL: Record<Removal['kind'], string> = {
+  tag: 'Unicode tag characters',
+  'variation-selector': 'variation selectors',
+  'zero-width': 'zero-width characters',
+  bidi: 'bidirectional controls',
+};
+
 /** Turns render trees into the visible text and the hidden findings, in document order. */
 export function assemble(roots: readonly RenderNode[]): { text: string; hidden: HiddenText[] } {
   const builder = new Builder();
   const findings = new Map<string, HiddenText>();
+  const report = (text: string, { reason, selector, detail }: Verdict): void => {
+    if (text === '') return;
+    const key = `${selector}\u0000${reason}\u0000${detail}`;
+    const existing = findings.get(key);
+    if (existing === undefined) findings.set(key, { text, reason, selector, detail });
+    else existing.text += ` ${text}`;
+  };
 
   const visit = (node: RenderNode, cellIndex: number): void => {
     if (node.kind === 'break') {
@@ -112,16 +128,23 @@ export function assemble(roots: readonly RenderNode[]): { text: string; hidden: 
     }
     if (node.kind === 'text') {
       if (node.hidden === null) {
-        builder.text(node.text, node.space);
+        if (!MAY_CONTAIN_INVISIBLE.test(node.text)) {
+          builder.text(node.text, node.space);
+          return;
+        }
+        const { text, removals } = stripInvisible(node.text);
+        for (const removal of removals) {
+          const detail = `${removal.count} ${INVISIBLE_DETAIL[removal.kind]}`;
+          report(squash(removal.text), {
+            reason: 'invisible-unicode',
+            selector: node.origin ?? ':root',
+            detail,
+          });
+        }
+        builder.text(text, node.space);
         return;
       }
-      const text = squash(node.text);
-      if (text === '') return;
-      const { reason, selector, detail } = node.hidden;
-      const key = `${selector}\u0000${reason}\u0000${detail}`;
-      const existing = findings.get(key);
-      if (existing === undefined) findings.set(key, { text, reason, selector, detail });
-      else existing.text += ` ${text}`;
+      report(squash(node.text), node.hidden);
       return;
     }
     const { layout, children } = node;
