@@ -12,6 +12,7 @@ import type { ComponentValue } from '@csstools/css-parser-algorithms';
 import { isFunctionNode } from '@csstools/css-parser-algorithms';
 import { TokenType } from '@csstools/css-tokenizer';
 import type { AnyNode, Document, Element } from 'domhandler';
+import type { Warning, WarningCode } from '../types.js';
 import { own } from '../util.js';
 import {
   type Context,
@@ -67,13 +68,6 @@ import {
   trim,
 } from './syntax.js';
 import { presentationalHints, UA_STYLESHEET } from './ua.js';
-
-export type WarningCode = 'unresolved-stylesheet' | 'unsupported-selector' | 'unknown-condition';
-
-export interface Warning {
-  code: WarningCode;
-  message: string;
-}
 
 export interface StyleOptions {
   environment: Environment;

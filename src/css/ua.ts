@@ -23,12 +23,14 @@ article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section { display: block; }
 dir, dd, dl, dt, menu, ol, ul { display: block; }
 li { display: list-item; }
 dialog:not([open]) { display: none; }
+[popover]:not(:popover-open):not(dialog[open]) { display: none; }
 slot { display: contents; }
 fieldset, details, summary { display: block; }
 details > summary:first-of-type { display: list-item; }
 ruby { display: ruby; }
 rt { display: ruby-text; }
 input, select, button, textarea, marquee, meter, progress { display: inline-block; }
+option, optgroup { display: block; }
 
 table { display: table; }
 caption { display: table-caption; }

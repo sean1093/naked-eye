@@ -234,7 +234,7 @@ function leaf(expr: { value: number; unit: string }, ctx: Context): Typed | null
   if (unit === '%') {
     if (ctx.percent === 'number') return typed('number', value / 100);
     if (ctx.basis !== undefined) return typed('length', (value / 100) * ctx.basis);
-    return typed('length', 0, value, value !== 0);
+    return typed('length', 0, value);
   }
   const absolute = own(ABSOLUTE, unit);
   if (absolute !== undefined) return typed('length', value * absolute);
