@@ -508,6 +508,49 @@ export const cases: Case[] = [
       },
     ],
   },
+  {
+    name: 'a frame a reader cannot see',
+    html: '<p>outside</p><iframe srcdoc="<p>hidden frame</p>" style="visibility: hidden" width="300" height="100"></iframe><iframe srcdoc="<p>tiny frame</p>" style="width: 0; height: 0; border: 0"></iframe><iframe srcdoc="<p>moved frame</p>" style="position: absolute; left: -9999px" width="300" height="100"></iframe>',
+    visible: 'outside',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'outside',
+        hidden: [
+          ['visibility-hidden', 'hidden frame'],
+          ['zero-size', 'tiny frame'],
+          ['off-screen', 'moved frame'],
+        ],
+        reason:
+          'Browser mode reads a same-origin frame, so it also has to judge the frame box itself; static mode never reads srcdoc and reports nothing.',
+      },
+    ],
+  },
+  {
+    name: 'text a scroll container has scrolled out of sight',
+    html: '<div id="strip" style="width: 120px; overflow-x: auto; white-space: nowrap"><span style="display: inline-block; width: 120px">one</span><span style="display: inline-block; width: 120px">two</span></div><script>strip.scrollLeft = 120</script>',
+    visible: 'onetwo',
+  },
+  {
+    name: 'a deferred subtree past the end of the page',
+    html: '<div style="height: 2000px"></div><div style="content-visibility: auto"><p>deferred text</p></div>',
+    visible: 'deferred text',
+  },
+  {
+    name: 'a fixed backdrop reaches text below the fold',
+    html: '<div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><div style="height: 2000px"></div><p style="color: #eee">below the fold</p>',
+    visible: 'below the fold',
+  },
+  {
+    name: 'a scrim that takes no pointer events is still a backdrop',
+    html: '<section style="position: relative"><div style="position: absolute; inset: 0; background: #111; pointer-events: none"></div><h1 style="position: relative; color: #eee">scrim title</h1></section>',
+    visible: 'scrim title',
+  },
+  {
+    name: 'a backdrop inside a shadow root',
+    html: '<div style="position: relative"><template shadowrootmode="open"><div style="position: absolute; inset: 0; background: #111"></div><p style="position: relative; color: #eee">shadow hero</p></template></div>',
+    visible: 'shadow hero',
+  },
   // Color and contrast.
   {
     name: 'white text on white, in every color syntax',

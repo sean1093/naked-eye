@@ -117,6 +117,23 @@ describe.runIf(selected.length > 0)('the shared corpus in browser mode', () => {
           result.warnings.find((warning) => warning.code === 'cross-origin-frame')?.message,
         ).toContain('https://outside.test/other');
       });
+
+      it('extracts a large page in time linear in the number of text nodes', async () => {
+        const time = async (count: number): Promise<number> => {
+          await page.setContent(documentOf('<span>x</span>'.repeat(count)));
+          const started = performance.now();
+          const { text } = await extractVisibleFromPage(page);
+          const elapsed = performance.now() - started;
+          expect(text).toHaveLength(count);
+          return elapsed;
+        };
+        await time(2_000);
+        // Four times the text nodes: linear work takes about four times as
+        // long, work that hit-tests each node against every box sixteen.
+        const small = await time(8_000);
+        const large = await time(32_000);
+        expect(large / small).toBeLessThan(10);
+      });
     });
   }
 });

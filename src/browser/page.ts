@@ -185,6 +185,78 @@ interface Layer {
 const TRANSPARENT: RGBA = { r: 0, g: 0, b: 0, a: 0 };
 const CLEAR: Layer = { color: TRANSPARENT, image: false };
 
+/** A box that can paint behind text it is not an ancestor of, in document coordinates. */
+interface Painter {
+  rect: Rect;
+  layer: Layer;
+}
+
+/** The painters of one document, bucketed by grid cell. */
+interface PainterIndex {
+  cells: Map<string, Painter[]>;
+}
+
+/** The side of one grid cell, in CSS pixels: a few viewports wide. */
+const CELL = 2048;
+
+/** The cell of painters that may cover any point, however far away. */
+const EVERYWHERE = 'all';
+
+/** How many painters one document contributes, so a hostile page stays bounded. */
+const PAINTER_LIMIT = 1024;
+
+/** How many backdrops one piece of text is judged against, as in static mode. */
+const BACKDROP_LIMIT = 16;
+
+const cellKey = (x: number, y: number): string => `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
+
+/** Every cell a rectangle touches; one that spans a huge area goes in the shared cell. */
+function cellsOf(rect: Rect): string[] {
+  if (!Number.isFinite(rect.right) || !Number.isFinite(rect.bottom)) return [EVERYWHERE];
+  const [first, last] = [Math.floor(rect.left / CELL), Math.floor(rect.right / CELL)];
+  const [top, bottom] = [Math.floor(rect.top / CELL), Math.floor(rect.bottom / CELL)];
+  if ((last - first + 1) * (bottom - top + 1) > 64) return [EVERYWHERE];
+  const keys: string[] = [];
+  for (let x = first; x <= last; x += 1)
+    for (let y = top; y <= bottom; y += 1) keys.push(`${x},${y}`);
+  return keys;
+}
+
+/** Whether two rectangles share any area. */
+const meets = (rect: Rect, box: Rect): boolean =>
+  rect.right > box.left && rect.left < box.right && rect.bottom > box.top && rect.top < box.bottom;
+
+const centreOf = (rect: Rect | undefined): [number, number] | null =>
+  rect === undefined ? null : [(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2];
+
+/**
+ * The pair `open-quote` and `close-quote` draw, from the computed `quotes`.
+ * Only the outermost level is modelled, as in static mode; `none` draws
+ * nothing and `auto` draws the English pair every engine defaults to.
+ */
+function quotePair(value: string): [string, string] {
+  if (value === 'none') return ['', ''];
+  const strings = spaceTokens(value)
+    .filter((token) => /^["']/.test(token))
+    .map((token) => token.slice(1, -1));
+  const [open, close] = strings;
+  return open === undefined || close === undefined ? ['\u201C', '\u201D'] : [open, close];
+}
+
+/**
+ * A box a reader can scroll: the padding box it shows, and how far its content
+ * can still be moved in each direction. Text outside the box but inside that
+ * range can be brought into view.
+ */
+interface Scrollport {
+  rect: Rect;
+  /** How far the content can move right, down, left and up: the scroll offsets. */
+  right: number;
+  bottom: number;
+  left: number;
+  top: number;
+}
+
 /**
  * What draws the glyphs of a run of text, and where a finding about it points.
  * The backdrop is not known yet: it depends on where the text actually lands,
@@ -198,6 +270,8 @@ interface Ink {
   element: Element;
   /** The pseudo-element the finding names, when the ink is a pseudo-element's. */
   selector: string | undefined;
+  /** A pseudo-element's own background, which paints behind its own glyphs. */
+  own: Layer | null;
   /** Identical inks share one finding, as in static mode. */
   key: string;
 }
@@ -221,6 +295,10 @@ interface Frame {
   perspective: number | null;
   /** Ancestors that cut their overflow off, outermost first. */
   clips: readonly Clip[];
+  /** Ancestors that can be scrolled, outermost first: their range is reachable. */
+  scrollports: readonly Scrollport[];
+  /** Inside a `content-visibility: auto` subtree, which renders when scrolled to. */
+  deferred: boolean;
 }
 
 /** World-independent context, as in static mode. */
@@ -242,6 +320,8 @@ const ROOT_FRAME: Frame = {
   scale: 1,
   perspective: null,
   clips: [],
+  scrollports: [],
+  deferred: false,
 };
 
 const px = (value: number): string => `${Number.parseFloat(value.toFixed(2))}px`;
@@ -542,6 +622,8 @@ class Extractor {
   /** Fragments and documents that are not reachable through `parentNode`. */
   private readonly hosts = new WeakMap<Node, Element>();
   private readonly selectorOf = createSelector(this.hosts);
+  private readonly backgrounds = new WeakMap<Element, RGBA | null>();
+  private readonly painters = new WeakMap<Document, PainterIndex>();
   private readonly textClips = new WeakMap<Element, RGBA | null | undefined>();
   private readonly canvases = new WeakMap<Document, RGBA | null>();
   private readonly areas = new WeakMap<Document, Rect>();
@@ -702,73 +784,31 @@ class Extractor {
     return result;
   }
 
-  /** The element itself and its flat-tree ancestors, innermost first. */
-  private chainOf(node: Node): Element[] {
-    const chain: Element[] = [];
-    let element = node.nodeType === ELEMENT ? (node as Element) : flatParent(node);
-    while (element !== null) {
-      chain.push(element);
-      element = flatParent(element);
-    }
-    return chain;
-  }
-
   /**
-   * The opaque color painted under a point. The flat-tree ancestors always lie
-   * behind the text; hit-testing the point adds the boxes that lie behind it
-   * without being anybody's ancestor, which is how an overlay, a dark theme
-   * layer or a table column paints behind text. Hit-testing does not reach
-   * into shadow trees or outside the viewport, so the two are merged: each
-   * hit keeps its place between the ancestors it was reported between.
-   * `null` when an image or an unreadable color is in the way.
+   * The opaque color behind an element's own content: its background and its
+   * flat-tree ancestors' composited over the canvas, with the background of a
+   * table cell's column in its place. `null` when an image or an unreadable
+   * color is in the way: contrast is then unknown.
    */
-  private backdropAt(point: [number, number] | null, element: Element): RGBA | null {
+  private backgroundOf(element: Element): RGBA | null {
+    if (this.backgrounds.has(element)) return this.backgrounds.get(element) ?? null;
     const doc = element.ownerDocument;
-    const view = doc.defaultView;
-    const chain = this.chainOf(element);
-    const family = new Set(chain);
-    const reachable =
-      point !== null &&
-      view !== null &&
-      point[0] >= 0 &&
-      point[1] >= 0 &&
-      point[0] <= view.innerWidth &&
-      point[1] <= view.innerHeight;
-    const hits = reachable && point !== null ? doc.elementsFromPoint(point[0], point[1]) : [];
-    // Everything above the text is in front of it, which is occlusion, not a backdrop.
-    const start = hits.findIndex((hit) => family.has(hit));
-    const below = start === -1 ? [] : hits.slice(start);
-    const stack: Element[] = [];
-    let cursor = 0;
-    for (const ancestor of chain) {
-      const at = below.indexOf(ancestor, cursor);
-      if (at === -1) {
-        stack.push(ancestor);
-        continue;
-      }
-      for (let index = cursor; index <= at; index += 1) stack.push(below[index] as Element);
-      cursor = at + 1;
-    }
-    let backdrop = this.canvasOf(doc);
-    // The stack is topmost first, so paint from the bottom upwards.
-    for (const box of stack.reverse()) {
-      const style = this.styleOf(box);
-      if (backdrop === null || style === null) break;
-      // An ancestor's opacity already applies to the text itself.
-      const alpha = family.has(box) ? 1 : Number.parseFloat(style.getPropertyValue('opacity'));
-      const fade = Number.isFinite(alpha) ? alpha : 1;
+    const style = this.styleOf(element);
+    let result: RGBA | null = null;
+    if (element === doc.documentElement) result = this.canvasOf(doc);
+    else if (style !== null) {
+      const parent = flatParent(element) ?? doc.documentElement;
       // A column's background paints above the table's and below the cell's.
-      const column = this.columnOf(box);
-      if (column !== null) backdrop = this.layerOver(column, backdrop, 1);
-      backdrop = this.layerOver(this.paintLayerOf(box, style), backdrop, fade);
-      if (point !== null) {
-        for (const which of ['before', 'after'] as const) {
-          const overlay = this.overlayLayerOf(box, style, which, point);
-          if (overlay !== null) backdrop = this.layerOver(overlay, backdrop, fade);
-        }
-      }
+      const column = this.columnOf(element);
+      const below = this.backgroundOf(parent);
+      result = this.layerOver(
+        this.paintLayerOf(element, style),
+        column === null ? below : this.layerOver(column, below, 1),
+        1,
+      );
     }
-    return backdrop;
+    this.backgrounds.set(element, result);
+    return result;
   }
 
   /** Composites one background layer over the backdrop; `null` when it hides what is below. */
@@ -799,18 +839,90 @@ class Extractor {
   }
 
   /**
-   * A positioned `::before` or `::after` whose box covers a point: the usual
-   * overlay behind a hero's text. Only an overlay inside an element that is
-   * its own containing block can be located, so any other is left out.
+   * Every box of a document that can paint behind text it is not an ancestor
+   * of: a positioned box with a background, a positioned `::before` or
+   * `::after`, each with the rectangle it covers in document coordinates.
+   * Collected once per document by walking the flat tree, so a box inside a
+   * shadow root counts, and indexed by a grid of cells so that a text node
+   * only looks at the few painters near it.
    */
-  private overlayLayerOf(
+  private paintersIn(doc: Document): PainterIndex {
+    const known = this.painters.get(doc);
+    if (known !== undefined) return known;
+    const index: PainterIndex = { cells: new Map() };
+    this.painters.set(doc, index);
+    const view = doc.defaultView;
+    if (view === null) return index;
+    const [scrollX, scrollY] = [view.scrollX, view.scrollY];
+    const viewport: Rect = { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight };
+    let budget = PAINTER_LIMIT;
+    const add = (box: Rect, layer: Layer, fixed: boolean): void => {
+      if (budget <= 0 || (layer.color?.a === 0 && !layer.image)) return;
+      budget -= 1;
+      // A fixed box that fills the viewport stays behind the text at every
+      // scroll offset, so it covers the whole document; a smaller one only
+      // covers where it sits.
+      const spans = fixed && box.left <= 0 && box.top <= 0;
+      const rect: Rect = {
+        left: box.left + scrollX,
+        top: box.top + scrollY,
+        right:
+          spans && box.right >= viewport.right ? Number.POSITIVE_INFINITY : box.right + scrollX,
+        bottom:
+          spans && box.bottom >= viewport.bottom ? Number.POSITIVE_INFINITY : box.bottom + scrollY,
+      };
+      if (spans && rect.right === Number.POSITIVE_INFINITY) rect.left = Number.NEGATIVE_INFINITY;
+      if (spans && rect.bottom === Number.POSITIVE_INFINITY) rect.top = Number.NEGATIVE_INFINITY;
+      for (const key of cellsOf(rect)) {
+        const list = index.cells.get(key);
+        if (list === undefined) index.cells.set(key, [{ rect, layer }]);
+        else list.push({ rect, layer });
+      }
+    };
+    const visit = (element: Element): void => {
+      const style = this.styleOf(element);
+      if (style === null || style.getPropertyValue('display') === 'none') return;
+      const position = style.getPropertyValue('position');
+      if (position === 'absolute' || position === 'fixed')
+        add(
+          element.getBoundingClientRect(),
+          this.paintLayerOf(element, style),
+          position === 'fixed',
+        );
+      if (element.namespaceURI === HTML_NAMESPACE && own(NO_PSEUDO, element.localName) !== true) {
+        for (const which of ['before', 'after'] as const) {
+          const overlay = this.overlayOf(element, which);
+          if (overlay !== null) add(overlay.box, overlay.layer, overlay.fixed);
+        }
+      }
+      for (const child of this.flatChildren(element)) visit(child);
+    };
+    for (const child of doc.children) visit(child);
+    return index;
+  }
+
+  /** An element's children in the flat tree: a host's shadow content, a slot's assigned nodes. */
+  private flatChildren(element: Element): Element[] {
+    const shadow = element.shadowRoot;
+    if (shadow !== null) return [...shadow.children];
+    if (element.localName === 'slot' && element.getRootNode() !== element.ownerDocument) {
+      const assigned = (element as HTMLSlotElement)
+        .assignedNodes()
+        .filter((node): node is Element => node.nodeType === ELEMENT);
+      if (assigned.length > 0) return assigned;
+    }
+    return [...element.children];
+  }
+
+  /**
+   * A positioned `::before` or `::after` and the box it covers: the usual
+   * overlay behind a hero's text. Its containing block is the nearest
+   * positioned ancestor, which is where its resolved insets are measured from.
+   */
+  private overlayOf(
     element: Element,
-    style: CSSStyleDeclaration,
     which: 'before' | 'after',
-    point: [number, number],
-  ): Layer | null {
-    if (element.namespaceURI !== HTML_NAMESPACE || own(NO_PSEUDO, element.localName) === true)
-      return null;
+  ): { box: Rect; layer: Layer; fixed: boolean } | null {
     const pseudo = this.styleOf(element, which);
     if (pseudo === null) return null;
     const content = pseudo.getPropertyValue('content');
@@ -819,22 +931,95 @@ class Extractor {
       content === '' ||
       content === 'none' ||
       pseudo.getPropertyValue('display') === 'none' ||
-      (position !== 'absolute' && position !== 'fixed') ||
-      style.getPropertyValue('position') === 'static'
+      (position !== 'absolute' && position !== 'fixed')
     )
       return null;
-    const box = element.getBoundingClientRect();
-    const edge = (name: string): number => Number.parseFloat(style.getPropertyValue(name)) || 0;
-    const inset = (name: string, fallback: number): number => {
+    const layer = this.layerOf(pseudo);
+    if (!layer.image && layer.color?.a === 0) return null;
+    const container = this.containingBlockOf(element, position === 'fixed');
+    if (container === null) return null;
+    const inset = (name: string): number => {
       const value = Number.parseFloat(pseudo.getPropertyValue(name));
-      return Number.isFinite(value) ? value : fallback;
+      return Number.isFinite(value) ? value : 0;
     };
-    const left = box.left + edge('border-left-width') + inset('left', 0);
-    const top = box.top + edge('border-top-width') + inset('top', 0);
-    const right = box.right - edge('border-right-width') - inset('right', 0);
-    const bottom = box.bottom - edge('border-bottom-width') - inset('bottom', 0);
-    if (point[0] < left || point[0] > right || point[1] < top || point[1] > bottom) return null;
-    return this.layerOf(pseudo);
+    const box: Rect = {
+      left: container.left + inset('left'),
+      top: container.top + inset('top'),
+      right: container.right - inset('right'),
+      bottom: container.bottom - inset('bottom'),
+    };
+    return { box, layer, fixed: position === 'fixed' };
+  }
+
+  /** The padding box a positioned descendant's insets are measured from. */
+  private containingBlockOf(element: Element, fixed: boolean): Rect | null {
+    const view = element.ownerDocument.defaultView;
+    for (let node: Element | null = element; node !== null; node = flatParent(node)) {
+      const style = this.styleOf(node);
+      if (style === null) break;
+      const position = style.getPropertyValue('position');
+      const transformed =
+        style.getPropertyValue('transform') !== 'none' ||
+        style.getPropertyValue('filter') !== 'none' ||
+        style.getPropertyValue('perspective') !== 'none';
+      if (transformed || (!fixed && position !== 'static')) {
+        const box = node.getBoundingClientRect();
+        const edge = (name: string): number => Number.parseFloat(style.getPropertyValue(name)) || 0;
+        return {
+          left: box.left + edge('border-left-width'),
+          top: box.top + edge('border-top-width'),
+          right: box.right - edge('border-right-width'),
+          bottom: box.bottom - edge('border-bottom-width'),
+        };
+      }
+    }
+    return view === null
+      ? null
+      : { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight };
+  }
+
+  /**
+   * The colors that may lie behind a piece of text, at most `BACKDROP_LIMIT`:
+   * the composite of its flat-tree ancestors, and that composite under every
+   * painter whose box covers the text. Text is kept when it contrasts with any
+   * of them, as in static mode. `null` when an image or an unreadable color is
+   * among them: contrast is then unknown.
+   */
+  private backdropsFor(element: Element, point: [number, number] | null): RGBA[] | null {
+    const base = this.backgroundOf(element);
+    if (base === null) return null;
+    if (point === null) return [base];
+    const doc = element.ownerDocument;
+    const view = doc.defaultView;
+    const spot: [number, number] = [
+      point[0] + (view?.scrollX ?? 0),
+      point[1] + (view?.scrollY ?? 0),
+    ];
+    const result = [base];
+    const seen = new Set([toHex(base)]);
+    const index = this.paintersIn(doc);
+    const nearby = [
+      ...(index.cells.get(cellKey(spot[0], spot[1])) ?? []),
+      ...(index.cells.get(EVERYWHERE) ?? []),
+    ];
+    for (const painter of nearby) {
+      const { rect, layer } = painter;
+      if (
+        spot[0] < rect.left ||
+        spot[0] > rect.right ||
+        spot[1] < rect.top ||
+        spot[1] > rect.bottom
+      )
+        continue;
+      const composite = this.layerOver(layer, base, 1);
+      if (composite === null) return null;
+      const key = toHex(composite);
+      if (result.length < BACKDROP_LIMIT && !seen.has(key)) {
+        seen.add(key);
+        result.push(composite);
+      }
+    }
+    return result;
   }
 
   /**
@@ -911,6 +1096,7 @@ class Extractor {
     frame: Frame,
     parent: Frame,
     selector: string | undefined,
+    ownBackground: boolean,
   ): Pick<Frame, 'color' | 'ink'> {
     const inks = this.inksOf(element, style, frame.scale);
     if (inks.includes(null)) return { color: null, ink: null };
@@ -929,11 +1115,25 @@ class Extractor {
       return { color, ink: null };
     }
     const key = `${toHex(fill)}|${painted.map(toHex).join(',')}`;
-    const ink =
-      parent.ink !== null && parent.ink.key === key
-        ? parent.ink
-        : { painted, fill, element, selector, key };
+    // A pseudo-element paints its own background behind its own glyphs.
+    const box = ownBackground ? this.layerOf(style) : null;
+    // An element that paints nothing of its own stands on the same backdrop as
+    // its parent, so it shares the parent's finding, as in static mode.
+    const inherit =
+      parent.ink !== null &&
+      parent.ink.key === key &&
+      selector === undefined &&
+      this.paintsNothing(element, style);
+    const ink = inherit ? (parent.ink as Ink) : { painted, fill, element, selector, own: box, key };
     return { color: null, ink };
+  }
+
+  /** Whether an element adds no background of its own to what is behind it. */
+  private paintsNothing(element: Element, style: CSSStyleDeclaration): boolean {
+    const layer = this.paintLayerOf(element, style);
+    if (layer.image || layer.color === null || layer.color.a !== 0) return false;
+    const name = element.localName;
+    return name !== 'td' && name !== 'th';
   }
 
   /**
@@ -990,6 +1190,33 @@ class Extractor {
     };
   }
 
+  /**
+   * A box a reader can scroll, and how far its content can still be moved.
+   * `overflow: hidden` is excluded: a script can scroll it, a reader cannot.
+   */
+  private scrollportOf(element: Element, style: CSSStyleDeclaration): Scrollport | null {
+    const scrolls = (axis: string): boolean => {
+      const overflow = style.getPropertyValue(axis);
+      return overflow === 'auto' || overflow === 'scroll';
+    };
+    const [x, y] = [scrolls('overflow-x'), scrolls('overflow-y')];
+    if (!x && !y) return null;
+    const box = element.getBoundingClientRect();
+    const edge = (name: string): number => Number.parseFloat(style.getPropertyValue(name)) || 0;
+    return {
+      rect: {
+        left: box.left + edge('border-left-width'),
+        top: box.top + edge('border-top-width'),
+        right: box.right - edge('border-right-width'),
+        bottom: box.bottom - edge('border-bottom-width'),
+      },
+      left: x ? element.scrollLeft : 0,
+      right: x ? element.scrollWidth - element.clientWidth - element.scrollLeft : 0,
+      top: y ? element.scrollTop : 0,
+      bottom: y ? element.scrollHeight - element.clientHeight - element.scrollTop : 0,
+    };
+  }
+
   /** The rectangles a text node actually covers, the empty ones left out. */
   private rectsOf(node: Text): DOMRect[] {
     const doc = node.ownerDocument;
@@ -1003,37 +1230,53 @@ class Extractor {
   }
 
   /**
-   * Where a text node is actually drawn. Text whose every rectangle falls
-   * outside what a reader can reach is hidden: cut off by an ancestor when it
-   * is still inside the page, moved out of the page otherwise.
+   * Where a piece of content is actually drawn. Content whose every rectangle
+   * falls outside what a reader can reach is hidden: cut off by an ancestor
+   * when it is still inside the page, moved out of the page otherwise.
+   *
+   * A scrollable ancestor is reach, not a boundary: the content's rectangle is
+   * first grown by how far that box can still scroll, and what is then inside
+   * its scrollport is judged at the scrollport's own place in the page.
    */
-  private placementOf(node: Text, frame: Frame): Verdict | null {
-    const doc = node.ownerDocument;
-    const rects = this.rectsOf(node);
+  private placementOf(node: Node, rects: readonly Rect[], frame: Frame): Verdict | null {
     if (rects.length === 0) return null;
-    const area = this.areaOf(doc);
-    const meets = (rect: DOMRect, box: Rect): boolean =>
-      rect.right > box.left &&
-      rect.left < box.right &&
-      rect.bottom > box.top &&
-      rect.top < box.bottom;
+    const doc = node.ownerDocument ?? (node as Document);
+    const page = this.areaOf(doc);
+    const area: Rect = frame.deferred ? { ...page, right: OPEN.right, bottom: OPEN.bottom } : page;
+    let reachable: Rect[] = [...rects];
+    for (const port of [...frame.scrollports].reverse()) {
+      const grown = reachable
+        .map((rect) => ({
+          left: rect.left - port.right,
+          right: rect.right + port.left,
+          top: rect.top - port.bottom,
+          bottom: rect.bottom + port.top,
+        }))
+        .filter((rect) => meets(rect, port.rect));
+      if (grown.length === 0) break;
+      // Once scrolled into view the content sits inside the scrollport, so the
+      // scrollport is what the rest of the page has to show.
+      reachable = [port.rect];
+    }
     if (
-      rects.some((rect) => meets(rect, area) && frame.clips.every((clip) => meets(rect, clip.rect)))
+      reachable.some(
+        (rect) => meets(rect, area) && frame.clips.every((clip) => meets(rect, clip.rect)),
+      )
     )
       return null;
     // Outside the page beats an ancestor that also cuts it off: being out of
     // reach is the stronger statement, and the one static mode makes too.
-    if (rects.every((rect) => !meets(rect, area))) {
-      const first = rects[0] as DOMRect;
+    if (reachable.every((rect) => !meets(rect, area))) {
+      const first = rects[0] as Rect;
       return this.verdict(
         'off-screen',
-        node.parentNode,
+        node.nodeType === ELEMENT ? node : node.parentNode,
         `drawn at ${px(first.left)}, ${px(first.top)}, outside the page`,
       );
     }
     const innermost = [...frame.clips]
       .reverse()
-      .find((clip) => rects.every((rect) => !meets(rect, clip.rect)));
+      .find((clip) => reachable.every((rect) => !meets(rect, clip.rect)));
     return innermost?.verdict ?? null;
   }
 
@@ -1135,6 +1378,9 @@ class Extractor {
       (Number.isFinite(zoom) ? zoom : 1) *
       (matrix === null ? 1 : scaleOfMatrix(matrix, parent.perspective, this.viewOf(element)));
 
+    // A skipped `content-visibility: auto` subtree is size-contained, so it adds
+    // nothing to the document's scroll area although scrolling there renders it.
+    if (boxed && style.getPropertyValue('content-visibility') === 'auto') frame.deferred = true;
     if (boxed && style.getPropertyValue('content-visibility') === 'hidden') {
       const detail =
         element.getAttribute('hidden')?.toLowerCase() === 'until-found'
@@ -1149,7 +1395,16 @@ class Extractor {
         ? (parent.font ?? at('font-size', `font-size: ${px(size)}`))
         : null;
 
-    const { color, ink } = this.inkOf(element, style, frame, parent, selector);
+    // Only `::before` and `::after` reach here with a selector, and their
+    // background is their own box, not a view of the element's.
+    const { color, ink } = this.inkOf(
+      element,
+      style,
+      frame,
+      parent,
+      selector,
+      selector !== undefined,
+    );
     frame.color = color;
     frame.ink = ink;
 
@@ -1172,6 +1427,8 @@ class Extractor {
       const clip =
         sized || namespace === SVG_NAMESPACE ? this.clipOf(element, style, transformed) : null;
       frame.clips = clip === null ? inherited : [...inherited, clip];
+      const port = sized ? this.scrollportOf(element, style) : null;
+      if (port !== null) frame.scrollports = [...parent.scrollports, port];
     }
     return frame;
   }
@@ -1203,33 +1460,37 @@ class Extractor {
     const graphics = scope.svgText ? null : scope.svgGraphics;
     if (frame.subtree !== null) return frame.subtree;
     if (graphics !== null) return graphics;
-    const blank = node.data.trim() === '';
-    const placement = blank ? null : this.placementOf(node, frame);
+    if (node.data.trim() === '') return null;
+    const rects = this.rectsOf(node);
     return (
-      placement ??
+      this.placementOf(node, rects, frame) ??
       frame.visibility ??
       frame.font ??
       frame.color ??
-      (blank ? null : this.contrastVerdict(frame.ink, this.pointIn(node)))
+      this.contrastVerdict(frame.ink, centreOf(rects[0]))
     );
   }
 
-  /** The centre of a text node's first rectangle, where its backdrop is read. */
-  private pointIn(node: Text): [number, number] | null {
-    const [rect] = this.rectsOf(node);
-    return rect === undefined ? null : [rect.left + rect.width / 2, rect.top + rect.height / 2];
-  }
-
-  /** Text drawn too close to the color behind it to be read. */
+  /** Text drawn too close to every color that may lie behind it to be read. */
   private contrastVerdict(ink: Ink | null, point: [number, number] | null): Verdict | null {
     if (ink === null) return null;
-    const backdrop = this.backdropAt(point, ink.element);
-    if (backdrop === null) return null;
+    let backdrops = this.backdropsFor(ink.element, point);
+    if (backdrops === null) return null;
+    if (ink.own !== null) {
+      // The pseudo-element's own background lies between its glyphs and everything else.
+      if (ink.own.image || ink.own.color === null) return null;
+      const paint = ink.own.color;
+      if (paint.a >= 1) backdrops = [paint];
+      else if (paint.a > 0) backdrops = backdrops.map((backdrop) => over(paint, backdrop));
+    }
     let best = 0;
-    for (const paint of ink.painted)
-      best = Math.max(best, contrast(over(paint, backdrop), backdrop));
-    if (best >= this.limits.minContrast) return null;
-    const detail = `${toHex(ink.fill)} on ${toHex(backdrop)}, contrast ${best.toFixed(2)}:1`;
+    for (const backdrop of backdrops) {
+      for (const paint of ink.painted)
+        best = Math.max(best, contrast(over(paint, backdrop), backdrop));
+      if (best >= this.limits.minContrast) return null;
+    }
+    const behind = backdrops[0] as RGBA;
+    const detail = `${toHex(ink.fill)} on ${toHex(behind)}, contrast ${best.toFixed(2)}:1`;
     return ink.selector === undefined
       ? this.verdict('low-contrast', ink.element, detail)
       : { reason: 'low-contrast', selector: ink.selector, detail };
@@ -1347,6 +1608,10 @@ class Extractor {
    * The verdict `::first-line` or `::first-letter` styles give a block's text,
    * when they hide text the block's own styles show. As in static mode the
    * whole block is judged by them, since a short block is one line.
+   *
+   * Only fonts, colors and visibility apply to these boxes, and opacity to
+   * `::first-letter`: a browser ignores display, position, margins, transforms
+   * and clipping on them, and some engines still report them here.
    */
   private startVerdict(
     element: Element,
@@ -1358,10 +1623,28 @@ class Extractor {
     if (this.inkVerdict(element, frame, scope) !== null) return null;
     const style = this.styleOf(element, which);
     if (style === null) return null;
-    const display = parseDisplay(style.getPropertyValue('display'));
     const selector = `${this.selectorOf(element)}::${which}`;
-    const pseudo = this.enter(element, style, display, frame, scope, selector);
-    return this.inkVerdict(element, pseudo, scope);
+    const visibility = style.getPropertyValue('visibility');
+    if (visibility !== 'visible' && visibility !== '')
+      return { reason: 'visibility-hidden', selector, detail: `visibility: ${visibility}` };
+    const size = Number.parseFloat(style.getPropertyValue('font-size')) * frame.scale;
+    if (Number.isFinite(size) && size < this.limits.minFontSize)
+      return { reason: 'font-size', selector, detail: `font-size: ${px(size)}` };
+    const read = Number.parseFloat(style.getPropertyValue('opacity'));
+    const opacity = which === 'first-letter' && Number.isFinite(read) ? read : 1;
+    if (frame.opacity * opacity < this.limits.minOpacity)
+      return { reason: 'opacity', selector, detail: `opacity: ${opacity}` };
+    const inked: Frame = { ...frame, opacity: frame.opacity * opacity };
+    // An engine reports the element's own background for a `::first-line` that
+    // declares none, so only a background that differs is the pseudo's own.
+    const own_ = this.styleOf(element);
+    const declared =
+      own_ === null ||
+      style.getPropertyValue('background-color') !== own_.getPropertyValue('background-color') ||
+      style.getPropertyValue('background-image') !== own_.getPropertyValue('background-image');
+    const { color, ink } = this.inkOf(element, style, inked, frame, selector, declared);
+    const box = element.getBoundingClientRect();
+    return color ?? this.contrastVerdict(ink, centreOf(box));
   }
 
   /**
@@ -1468,7 +1751,11 @@ class Extractor {
     return this.build(element.childNodes, frame, scope, style);
   }
 
-  /** The document of a same-origin frame, as a box of its own. */
+  /**
+   * The document of a same-origin frame, as a box of its own. The holder is
+   * judged first: a frame a reader cannot see hides everything inside it, and
+   * an invisible `<iframe srcdoc>` is the classic injection carrier.
+   */
   private frame(element: Element, frame: Frame, scope: Scope): RenderNode[] {
     if (frame.subtree !== null) return [];
     const holder = element as HTMLIFrameElement;
@@ -1486,12 +1773,25 @@ class Extractor {
         );
       return [];
     }
+    const box = element.getBoundingClientRect();
+    const hidden =
+      frame.visibility ??
+      (box.width <= 0 || box.height <= 0
+        ? this.verdict('zero-size', element, `the frame is ${px(box.width)} by ${px(box.height)}`)
+        : this.placementOf(element, [box], frame));
     this.hosts.set(doc, element);
+    const inside: Frame = {
+      ...frame,
+      // The frame's own document has its own area, scroll and clipping.
+      clips: [],
+      scrollports: [],
+      subtree: hidden ?? frame.subtree,
+    };
     return [
       {
         kind: 'box',
         layout: 'block',
-        children: this.build(doc.childNodes, { ...frame, clips: [] }, scope, null),
+        children: this.build(doc.childNodes, inside, scope, null),
       },
     ];
   }
@@ -1529,7 +1829,7 @@ class Extractor {
   ): RenderNode | null {
     const style = this.styleOf(element, which);
     if (style === null) return null;
-    const generated = this.contentOf(element, style.getPropertyValue('content'));
+    const generated = this.contentOf(element, style);
     const text = generated?.replace(PRIVATE_USE, '') ?? '';
     if (text === '') return null;
     const selector = `${this.selectorOf(element)}::${which}`;
@@ -1563,11 +1863,12 @@ class Extractor {
 
   /**
    * The text a computed `content` value puts on screen. Engines leave `attr()`
-   * in the computed value, so it is substituted here; counters and images are
-   * reported in `warnings` rather than rendered, as in static mode.
+   * and the quote keywords in the computed value, so both are resolved here;
+   * counters and images are reported in `warnings` rather than rendered, as in
+   * static mode.
    */
-  private contentOf(element: Element, value: string): string | null {
-    const text = value.trim();
+  private contentOf(element: Element, style: CSSStyleDeclaration): string | null {
+    const text = style.getPropertyValue('content').trim();
     if (text === '' || text === 'none' || text === 'normal') return null;
     const parts: string[] = [];
     let index = 0;
@@ -1611,8 +1912,8 @@ class Extractor {
       const name = word[0].toLowerCase();
       index += word[0].length;
       if (text[index] !== '(') {
-        if (name === 'open-quote') parts.push('\u201C');
-        else if (name === 'close-quote') parts.push('\u201D');
+        if (name === 'open-quote' || name === 'close-quote')
+          parts.push(quotePair(style.getPropertyValue('quotes'))[name === 'open-quote' ? 0 : 1]);
         else if (name !== 'no-open-quote' && name !== 'no-close-quote') return null;
         continue;
       }
