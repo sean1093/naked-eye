@@ -629,6 +629,11 @@ export const cases: Case[] = [
     visible: '$42 USD\n\npay here (https://evil.example/pay)',
   },
   {
+    name: 'quotes, and elements without a content box',
+    html: '<style>q::before { content: open-quote } q::after { content: close-quote } img::before, input::after, br::before { content: "never" }</style><p><q>quoted</q><img src="x.png" alt=""><input value="v"></p>',
+    visible: '\u201Cquoted\u201D',
+  },
+  {
     name: 'pseudo-elements that generate nothing',
     html: '<style>p::before { content: none } p::after { content: normal } i::before { content: "\\f101" }</style><p>plain</p><i>icon</i>',
     visible: 'plain\n\nicon',
