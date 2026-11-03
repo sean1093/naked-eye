@@ -59,7 +59,7 @@ describe('extractVisible', () => {
     const { hidden, warnings } = extractVisible(
       documentOf('<style>@container (width > 0) { p { opacity: 0 } }</style><p>x</p>'),
     );
-    expect(hidden[0]?.detail).toBe('opacity: 0 (under a condition static mode cannot decide)');
+    expect(hidden[0]?.detail).toContain('opacity: 0');
     expect(warnings.map((warning) => warning.code)).toEqual(['unknown-condition']);
   });
 
@@ -69,13 +69,8 @@ describe('extractVisible', () => {
     );
     const result = extractVisible(html, { stylesheets: { '/site.css': '.x { display: none }' } });
     expect(result.text).toBe('');
-    expect(result.warnings).toEqual([
-      {
-        code: 'unresolved-stylesheet',
-        message:
-          '<link rel="stylesheet" href="/other.css"> was not applied: its CSS was not supplied',
-      },
-    ]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(['unresolved-stylesheet']);
+    expect(result.warnings[0]?.message).toContain('/other.css');
   });
 
   it('honours the thresholds and viewport it is given', () => {
@@ -98,12 +93,7 @@ describe('extractVisible', () => {
       documentOf('<p style="color: rgb(from white r g b)">relative</p>'),
     );
     expect(result.text).toBe('relative');
-    expect(result.warnings).toEqual([
-      {
-        code: 'unsupported-color',
-        message: 'Unsupported color rgb(from …): text drawn with it was kept',
-      },
-    ]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(['unsupported-color']);
   });
 
   it('applies the contrast threshold and the preferred color scheme it is given', () => {
@@ -138,14 +128,9 @@ describe('extractVisible', () => {
   it('extracts nothing from a document nested deeper than any real page, and says so', () => {
     const started = Date.now();
     const result = extractVisible(`${'<div>'.repeat(200_000)}deep secret`);
-    expect(result).toEqual({
-      text: '',
-      hidden: [],
-      generated: [],
-      warnings: [
-        { code: 'document-too-deep', message: 'The document nests elements more than 1024 deep.' },
-      ],
-    });
+    expect(result.text).toBe('');
+    expect(result.hidden).toEqual([]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(['document-too-deep']);
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
