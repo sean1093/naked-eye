@@ -12,6 +12,12 @@ injections.
 > **Status:** under active development. The plan is tracked in the
 > [v0.1.0 milestone](https://github.com/sean1093/naked-eye/milestone/1).
 
+## Threat model
+
+What `naked-eye` guarantees, what it does not, and how to choose between static
+and browser mode:
+[docs/threat-model.md](https://github.com/sean1093/naked-eye/blob/main/docs/threat-model.md).
+
 ## License
 
 [MIT](LICENSE)
