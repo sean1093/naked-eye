@@ -1,0 +1,87 @@
+{
+  "name": "naked-eye",
+  "version": "0.0.0",
+  "description": "Give LLMs only the text a human can see: extract the visible text of an HTML document and report CSS-hidden text, comments and invisible Unicode, to stop indirect prompt injection.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Sean Chou (https://github.com/sean1093)",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "check:exports": "attw --pack . && publint",
+    "size": "size-limit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "prompt-injection",
+    "indirect-prompt-injection",
+    "llm",
+    "llm-security",
+    "ai-security",
+    "rag",
+    "agents",
+    "html",
+    "text-extraction",
+    "visible-text",
+    "hidden-text",
+    "css",
+    "playwright",
+    "puppeteer"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sean1093/naked-eye.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sean1093/naked-eye/issues"
+  },
+  "homepage": "https://github.com/sean1093/naked-eye#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@biomejs/biome": "^2.6.4",
+    "@size-limit/preset-small-lib": "^13.1.1",
+    "@types/node": "^22.20.5",
+    "@vitest/coverage-v8": "^4.1.12",
+    "publint": "^0.3.25",
+    "size-limit": "^13.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}
