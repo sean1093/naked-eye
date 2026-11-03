@@ -373,7 +373,7 @@ function compare(a: Specificity, b: Specificity): number {
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
-function maxOf(list: Selector[][], nesting: Nesting): Specificity {
+function maxOf(list: Selector[][], nesting: Scores): Specificity {
   let best: Specificity = [0, 0, 0];
   for (const complex of list) {
     const candidate = specificityOf(complex, nesting);
@@ -391,8 +391,11 @@ export type Nesting = Record<
   { test: (element: Element) => boolean; specificity: Specificity }
 >;
 
+/** Specificities of private pseudo-classes: nested parents, and `:host()` rewritten. */
+type Scores = Readonly<Record<string, { specificity: Specificity }>>;
+
 /** Selectors Level 4 specificity of one complex selector. */
-export function specificityOf(complex: Selector[], nesting: Nesting = {}): Specificity {
+export function specificityOf(complex: Selector[], nesting: Scores = {}): Specificity {
   const total: [number, number, number] = [0, 0, 0];
   for (const token of complex) {
     if (token.type === 'attribute') {
@@ -418,11 +421,6 @@ export function specificityOf(complex: Selector[], nesting: Nesting = {}): Speci
         continue;
       }
       if (Array.isArray(token.data) && SELECTOR_ARGUMENT[token.name] === true) {
-        add(total, maxOf(token.data, nesting));
-        continue;
-      }
-      if (Array.isArray(token.data) && (token.name === 'host' || token.name === 'host-context')) {
-        total[1] += 1;
         add(total, maxOf(token.data, nesting));
         continue;
       }
@@ -653,6 +651,7 @@ export function compileSelectorList(
     pseudos[name] = (element: Element) => parent.test(element);
   const options: Options<AnyNode, Element> = { quirksMode: quirks, pseudos };
   const lightOptions: Options<AnyNode, Element> = { quirksMode: quirks, pseudos: { ...pseudos } };
+  const scores: Record<string, { specificity: Specificity }> = { ...nesting };
   if (scope !== null) {
     options.adapter = scopedAdapter(scope);
     let counter = 0;
@@ -665,6 +664,11 @@ export function compileSelectorList(
         }
         if (token.name !== 'host' && token.name !== 'host-context') return token;
         const name = `-ne-host-${counter++}`;
+        // The pseudo-class counts once, plus its argument, as :is() would.
+        const argument: Specificity = Array.isArray(token.data)
+          ? maxOf(token.data, nesting)
+          : [0, 0, 0];
+        scores[name] = { specificity: [argument[0], argument[1] + 1, argument[2]] };
         const inner = Array.isArray(token.data)
           ? compile<AnyNode, Element>(
               token.data.map((part) => rewrite(part, namespaces)),
@@ -676,10 +680,16 @@ export function compileSelectorList(
             ? (element: Element) => element === scope.host && (inner === null || inner(element))
             : (element: Element) => {
                 if (element !== scope.host) return false;
+                // Shadow-including ancestors: a shadow root's parent is its host.
                 for (
                   let node: Element | null = element;
                   node !== null;
-                  node = node.parent?.type === 'tag' ? node.parent : null
+                  node =
+                    node.parent?.type === 'tag'
+                      ? node.parent
+                      : node.parent?.type === 'root' && node.parent.parent?.type === 'tag'
+                        ? node.parent.parent
+                        : null
                 ) {
                   if (inner === null || inner(node)) return true;
                 }
@@ -701,7 +711,7 @@ export function compileSelectorList(
   try {
     for (const [position, original] of list.entries()) {
       const complex = forgive(original, compiles);
-      const specificity = specificityOf(complex, nesting);
+      const specificity = specificityOf(complex, scores);
       const index = complex.findIndex((token) => token.type === 'pseudo-element');
       let target = complex;
       let pseudoElement: string | null = null;

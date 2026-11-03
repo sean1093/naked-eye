@@ -260,8 +260,8 @@ interface ScopeRules {
   layer: Layer;
   index: Map<string, Entry[]>;
   pseudoIndex: Record<PseudoElement, Map<string, Entry[]>>;
-  /** `::part()` rules, matched against the host that exposes an element. */
-  parts: Entry[];
+  /** `::part()` rules by their first part name, matched against the host that exposes an element. */
+  parts: Map<string, Entry[]>;
   /** For selector matching from inside a shadow tree. */
   shadow: ShadowScope | null;
 }
@@ -432,7 +432,7 @@ export function createStyleEngine(
       'first-line': new Map(),
       'first-letter': new Map(),
     },
-    parts: [],
+    parts: new Map(),
     shadow: scopeShadow,
   });
   const ua = newScope(null);
@@ -538,7 +538,10 @@ export function createStyleEngine(
         owner = chromiumOnly;
       }
       if (target === null) {
-        rules.parts.push({ block: owner, selector });
+        const first = selector.part?.[0] ?? '';
+        const named = rules.parts.get(first);
+        if (named === undefined) rules.parts.set(first, [{ block: owner, selector }]);
+        else named.push({ block: owner, selector });
         continue;
       }
       const list = target.get(selector.bucket);
@@ -1033,19 +1036,23 @@ export function createStyleEngine(
       const rules = scopes.get(entry.root) as ScopeRules;
       for (const match of lookup(element, rules.index, ':slotted', depth)) list.push(match);
     }
-    // A part is styled by `::part()` from the tree around each host exposing it, and from
-    // inside that host's own tree by `:host::part()`.
+    // A part is styled by `::part()` from the tree around each host exposing it, and the
+    // innermost one also from inside its own tree by `:host::part()`.
     let outward = 0;
     for (const { host, names } of shadow?.partsOf(element) ?? []) {
-      const trees: [ScopeRules, number][] = [
-        [scopes.get(shadow?.scopeOf(host) ?? null) as ScopeRules, outward - 1],
-        [scopes.get(shadow?.roots.get(host) ?? null) as ScopeRules, outward],
+      const trees: [ScopeRules, number, boolean][] = [
+        [scopes.get(shadow?.scopeOf(host) ?? null) as ScopeRules, outward - 1, false],
       ];
+      if (outward === 0)
+        trees.push([scopes.get(shadow?.roots.get(host) ?? null) as ScopeRules, 0, true]);
       outward -= 1;
-      for (const [rules, context] of trees) {
-        for (const { block, selector } of rules.parts) {
-          if (selector.part?.every((name) => names.includes(name)) === true && selector.test(host))
-            list.push({ block, specificity: selector.specificity, context });
+      for (const [rules, context, inside] of trees) {
+        for (const name of names) {
+          for (const { block, selector } of rules.parts.get(name) ?? []) {
+            if (inside && selector.bucket !== ':host') continue;
+            if (selector.part?.every((part) => names.has(part)) === true && selector.test(host))
+              list.push({ block, specificity: selector.specificity, context });
+          }
         }
       }
     }

@@ -803,4 +803,20 @@ export const cases: Case[] = [
     visible: 'kept',
     hidden: [['display-none', 'hidden by its own tree']],
   },
+  {
+    name: 'reserved custom element names do not host shadow roots',
+    html: '<font-face><template shadowrootmode="open">template text</template>real text</font-face>',
+    visible: 'real text',
+  },
+  {
+    name: ':host() counts its argument in specificity',
+    html: '<div class="a"><template shadowrootmode="open"><style>:host(.a) { display: none } :host { display: block }</style>more specific hides</template></div><div class="b"><template shadowrootmode="open"><style>:host(.b) { display: block } :host { display: none }</style>more specific shows</template></div>',
+    visible: 'more specific shows',
+    hidden: [['display-none', 'more specific hides']],
+  },
+  {
+    name: ':host::part() does not see names exported from deeper trees',
+    html: '<div><template shadowrootmode="open"><style>:host::part(e) { display: none }</style><section exportparts="inner: e"><template shadowrootmode="open"><p part="inner">exported, still shown</p></template></section></template></div>',
+    visible: 'exported, still shown',
+  },
 ];

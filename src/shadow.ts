@@ -40,7 +40,7 @@ export interface ShadowTrees {
    * the part names it carries there: its `part` attribute for the host of its
    * own tree, then the names each host's `exportparts` forwards one tree out.
    */
-  partsOf(element: Element): { host: Element; names: string[] }[];
+  partsOf(element: Element): { host: Element; names: ReadonlySet<string> }[];
 }
 
 const isElement = (node: AnyNode | null): node is Element =>
@@ -68,22 +68,34 @@ const HOSTS: Record<string, true> = {
   span: true,
 };
 
+/** Dashed names a custom element may not take, so they cannot host a shadow root either. */
+const RESERVED: Record<string, true> = {
+  'annotation-xml': true,
+  'color-profile': true,
+  'font-face': true,
+  'font-face-src': true,
+  'font-face-uri': true,
+  'font-face-format': true,
+  'font-face-name': true,
+  'missing-glyph': true,
+};
+
 const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
 
 function canHost(element: Element): boolean {
-  if (element.namespace !== HTML_NAMESPACE) return false;
+  if (element.namespace !== HTML_NAMESPACE || RESERVED[element.name] === true) return false;
   return HOSTS[element.name] === true || /^[a-z][^\sA-Z]*-[^\sA-Z]*$/.test(element.name);
 }
 
 const slotName = (node: AnyNode): string => (isElement(node) ? (node.attribs.slot ?? '') : '');
 
 /** The names an `exportparts` attribute forwards: comma-separated `inner` or `inner: outer`. */
-function exported(attribute: string | undefined, names: string[]): string[] {
-  const out: string[] = [];
+function exported(attribute: string | undefined, names: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
   for (const mapping of attribute?.split(',') ?? []) {
     const [inner = '', outer = inner, extra] = mapping.split(':').map((part) => part.trim());
     if (extra !== undefined || !/^[^\s:,]+$/.test(inner) || !/^[^\s:,]+$/.test(outer)) continue;
-    if (names.includes(inner)) out.push(outer);
+    if (names.has(inner)) out.add(outer);
   }
   return out;
 }
@@ -99,34 +111,41 @@ export function attachShadowRoots(document: Document): ShadowTrees {
   const slotOf = new Map<AnyNode, Slotting>();
   const unassigned = new Map<Element, AnyNode[]>();
 
-  // Attach roots in tree order, including roots declared inside other shadow trees.
-  const visit = (parent: ParentNode, scope: ShadowRoot | null): void => {
-    for (const child of [...parent.children]) {
-      if (!isElement(child)) continue;
-      if (scope !== null) scopes.set(child, scope);
-      if (child.name === 'template') {
-        const mode = child.attribs.shadowrootmode?.toLowerCase();
-        const host = child.parent;
-        const content = child.children[0];
-        if (
-          (mode === 'open' || mode === 'closed') &&
-          isElement(host) &&
-          canHost(host) &&
-          !roots.has(host) &&
-          content !== undefined &&
-          'children' in content
-        ) {
-          host.children.splice(host.children.indexOf(child), 1);
-          const root: ShadowRoot = { fragment: content, host };
-          roots.set(host, root);
-          visit(content, root);
-        }
-        continue;
-      }
-      visit(child, scope);
-    }
+  // Attach roots in tree order, including roots declared inside other shadow trees. The walk
+  // keeps its own stack: nesting is attacker-controlled.
+  const stack: { node: AnyNode; scope: ShadowRoot | null }[] = [];
+  const pushChildren = (parent: ParentNode, scope: ShadowRoot | null): void => {
+    for (let index = parent.children.length - 1; index >= 0; index -= 1)
+      stack.push({ node: parent.children[index] as AnyNode, scope });
   };
-  visit(document, null);
+  pushChildren(document, null);
+  while (stack.length > 0) {
+    const { node: child, scope } = stack.pop() as { node: AnyNode; scope: ShadowRoot | null };
+    if (!isElement(child)) continue;
+    if (scope !== null) scopes.set(child, scope);
+    if (child.name !== 'template') {
+      pushChildren(child, scope);
+      continue;
+    }
+    const mode = child.attribs.shadowrootmode?.toLowerCase();
+    const host = child.parent;
+    const content = child.children[0];
+    if (
+      (mode === 'open' || mode === 'closed') &&
+      isElement(host) &&
+      canHost(host) &&
+      !roots.has(host) &&
+      content !== undefined &&
+      'children' in content
+    ) {
+      // The parser drops the template and makes its content the host's shadow root.
+      host.children.splice(host.children.indexOf(child), 1);
+      content.parent = host;
+      const root: ShadowRoot = { fragment: content, host };
+      roots.set(host, root);
+      pushChildren(content, root);
+    }
+  }
 
   // The first slot of each name in tree order takes the host's matching light children. Slots
   // among a nested host's light children belong to this tree too; its shadow tree does not.
@@ -174,9 +193,11 @@ export function attachShadowRoots(document: Document): ShadowTrees {
     unslotted: (host) => unassigned.get(host) ?? [],
     assignedSlot: (node) => slotOf.get(node),
     partsOf: (element) => {
-      const levels: { host: Element; names: string[] }[] = [];
-      let names = (element.attribs.part ?? '').split(/[\t\n\f\r ]+/).filter((name) => name !== '');
-      for (let host = scopes.get(element)?.host; host !== undefined && names.length > 0; ) {
+      const levels: { host: Element; names: ReadonlySet<string> }[] = [];
+      let names = new Set(
+        (element.attribs.part ?? '').split(/[\t\n\f\r ]+/).filter((name) => name !== ''),
+      );
+      for (let host = scopes.get(element)?.host; host !== undefined && names.size > 0; ) {
         levels.push({ host, names });
         names = exported(host.attribs.exportparts, names);
         host = scopes.get(host)?.host;

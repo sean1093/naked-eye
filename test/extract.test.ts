@@ -56,6 +56,22 @@ describe('extractVisible', () => {
     ]);
   });
 
+  it('walks :host-context() out through enclosing shadow roots', () => {
+    const result = extractVisible(
+      '<!doctype html><html><body><div class="dark"><template shadowrootmode="open"><div><template shadowrootmode="open"><style>:host-context(.dark) p { display: none }</style><p>hidden in Chromium</p></template></div></template></div></body></html>',
+    );
+    expect(result.hidden.map((finding) => finding.text)).toEqual(['hidden in Chromium']);
+  });
+
+  it('names shadow content through its host', () => {
+    const { hidden } = extractVisible(
+      documentOf(
+        '<div id="card"><template shadowrootmode="open"><p style="display: none">secret</p></template></div>',
+      ),
+    );
+    expect(hidden.map((finding) => finding.selector)).toEqual(['#card > p']);
+  });
+
   it('merges the text of one hidden element into one finding', () => {
     const { hidden } = extractVisible(documentOf('<div style="display: none">a <b>b</b> c</div>'));
     expect(hidden).toEqual([
