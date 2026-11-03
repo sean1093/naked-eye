@@ -41,6 +41,7 @@ npm test
 | `npm run size` | Checks the bundle-size budget of the built entry points, dependencies included. |
 | `npm run check:docs` | Checks links, anchors and code fences in the documentation, offline. |
 | `npm run examples` | Runs the examples in `examples/` against the built package; the second needs Playwright's Chromium. |
+| `npm run release` | Publishes the versioned package to npm; run by the release workflow, not by hand. |
 
 ## Project layout
 
@@ -50,6 +51,7 @@ test/       Vitest suites
 docs/       the threat model and reference documentation
 scripts/    repository tooling: the documentation gate and the page-script bundler
 examples/   runnable examples, run in CI against the built package
+.changeset/ unreleased changes, consumed by the release workflow
 .github/    CI workflows, issue forms and the pull request template
 ```
 
@@ -110,6 +112,37 @@ branches. Raise them when you can; never lower them to get a change through.
 The library parses attacker-controlled HTML and CSS, so every runtime
 dependency is part of its attack surface and ships to every user. A pull
 request that adds one explains why the existing dependencies cannot do the job.
+
+## Releases
+
+Releases are automated and restricted to maintainers.
+
+[Changesets](https://github.com/changesets/changesets) collects the changeset
+files on `main` and opens a "Version Packages" pull request that bumps the
+version and writes `CHANGELOG.md`. Merging that pull request publishes to npm
+with [provenance](https://docs.npmjs.com/generating-provenance-statements).
+Nobody publishes from a laptop, and `CHANGELOG.md` is generated: please do not
+edit it by hand in a pull request. A pull request that changes shipped behavior
+adds a changeset (`npx changeset`); see [.changeset/README.md](.changeset/README.md).
+
+Neither step runs unopposed: the release workflow's first job re-runs the
+quality gates on the same commit, and both the version pull request and the
+publish depend on it, so a red `main` does not ship. That job is also where the
+dependency install and the build happen; the job that holds the publish token
+installs with `--ignore-scripts` and runs no third-party install script beside
+it.
+
+One-time setup, for whoever owns the npm package: add an npm **automation**
+token as a repository secret named `NPM_TOKEN` under Settings, then Secrets and
+variables, then Actions. Classic tokens and granular tokens with 2FA
+enforcement are rejected by unattended publishes. Until that secret exists the
+release workflow runs, builds, and then stops with a warning instead of
+publishing.
+
+To release on demand rather than on the next push to `main`, run the Release
+workflow manually: Actions, Release, Run workflow. Changesets publishes only
+versions the registry does not already have, so a run with nothing to do
+finishes without publishing anything.
 
 ## What does not belong in this library
 

@@ -54,6 +54,7 @@
     "size": "size-limit",
     "check:docs": "node scripts/check-docs.mjs",
     "examples": "node examples/clean-for-rag.mjs && node examples/playwright-agent.mjs",
+    "release": "changeset publish",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -87,6 +88,7 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@biomejs/biome": "^2.6.4",
+    "@changesets/cli": "^3.0.3",
     "@size-limit/preset-small-lib": "^13.1.1",
     "@types/node": "^22.20.5",
     "@vitest/coverage-v8": "^4.1.12",
