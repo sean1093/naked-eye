@@ -189,11 +189,15 @@ const CLEAR: Layer = { color: TRANSPARENT, image: false };
 interface Painter {
   rect: Rect;
   layer: Layer;
+  /** The element whose content it may lie under: its containing block. */
+  under: Element;
 }
 
 /** The painters of one document, bucketed by grid cell. */
 interface PainterIndex {
   cells: Map<string, Painter[]>;
+  /** How far a skipped `content-visibility: auto` subtree reaches past the scroll area. */
+  deferred: { right: number; bottom: number } | null;
 }
 
 /** The side of one grid cell, in CSS pixels: a few viewports wide. */
@@ -202,11 +206,32 @@ const CELL = 2048;
 /** The cell of painters that may cover any point, however far away. */
 const EVERYWHERE = 'all';
 
-/** How many painters one document contributes, so a hostile page stays bounded. */
-const PAINTER_LIMIT = 1024;
+/** How many painters one grid cell keeps: the largest, so a crowd of small boxes evicts nothing. */
+const CELL_LIMIT = 32;
 
 /** How many backdrops one piece of text is judged against, as in static mode. */
 const BACKDROP_LIMIT = 16;
+
+/** How much of a box is painted: its own opacity and any `filter: opacity()`. */
+function opacityOf(style: CSSStyleDeclaration): number {
+  const own_ = Number.parseFloat(style.getPropertyValue('opacity'));
+  const filters = [...style.getPropertyValue('filter').matchAll(/opacity\(([^)]*)\)/g)].reduce(
+    (total, match) => {
+      const raw = (match[1] as string).trim();
+      const amount = Number.parseFloat(raw);
+      return total * (Number.isFinite(amount) ? (raw.endsWith('%') ? amount / 100 : amount) : 1);
+    },
+    1,
+  );
+  return (Number.isFinite(own_) ? own_ : 1) * filters;
+}
+
+/** The painters of a cell that cover the most area, for when a cell holds too many. */
+function largest(painters: Painter[]): Painter[] {
+  const area = ({ rect }: Painter): number =>
+    Math.max(0, rect.right - rect.left) * Math.max(0, rect.bottom - rect.top);
+  return [...painters].sort((one, two) => area(two) - area(one)).slice(0, CELL_LIMIT);
+}
 
 const cellKey = (x: number, y: number): string => `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
 
@@ -255,6 +280,10 @@ interface Scrollport {
   bottom: number;
   left: number;
   top: number;
+  /** The element is a containing block for absolutely positioned descendants. */
+  absolute: boolean;
+  /** The element is a containing block for fixed descendants. */
+  fixed: boolean;
 }
 
 /**
@@ -297,8 +326,6 @@ interface Frame {
   clips: readonly Clip[];
   /** Ancestors that can be scrolled, outermost first: their range is reachable. */
   scrollports: readonly Scrollport[];
-  /** Inside a `content-visibility: auto` subtree, which renders when scrolled to. */
-  deferred: boolean;
 }
 
 /** World-independent context, as in static mode. */
@@ -321,7 +348,6 @@ const ROOT_FRAME: Frame = {
   perspective: null,
   clips: [],
   scrollports: [],
-  deferred: false,
 };
 
 const px = (value: number): string => `${Number.parseFloat(value.toFixed(2))}px`;
@@ -682,12 +708,16 @@ class Extractor {
       styles.some(
         (style) => style !== null && own(CUTS_OFF, style.getPropertyValue(axis)) === true,
       );
+    // A skipped `content-visibility: auto` subtree is size-contained, so the
+    // scroll area stops short of it although scrolling there renders it; what
+    // it would add is its own rectangles, and a page that clips still clips.
+    const deferred = this.paintersIn(doc).deferred;
     const width = cutsOff('overflow-x')
       ? root.clientWidth
-      : Math.max(root.scrollWidth, root.clientWidth);
+      : Math.max(root.scrollWidth, root.clientWidth, deferred?.right ?? 0);
     const height = cutsOff('overflow-y')
       ? root.clientHeight
-      : Math.max(root.scrollHeight, root.clientHeight);
+      : Math.max(root.scrollHeight, root.clientHeight, deferred?.bottom ?? 0);
     const [x, y] = [view?.scrollX ?? 0, view?.scrollY ?? 0];
     const area: Rect = { left: -x, top: -y, right: width - x, bottom: height - y };
     this.areas.set(doc, area);
@@ -840,64 +870,87 @@ class Extractor {
 
   /**
    * Every box of a document that can paint behind text it is not an ancestor
-   * of: a positioned box with a background, a positioned `::before` or
-   * `::after`, each with the rectangle it covers in document coordinates.
-   * Collected once per document by walking the flat tree, so a box inside a
-   * shadow root counts, and indexed by a grid of cells so that a text node
-   * only looks at the few painters near it.
+   * of: a positioned box with a background and a positioned `::before` or
+   * `::after`, each with the rectangle it covers in document coordinates and
+   * the element whose content it may lie under, its containing block, as in
+   * static mode. Collected once per document by walking the flat tree, so a
+   * box inside a shadow root counts, and bucketed into a grid of cells so that
+   * a text node only looks at the painters near it.
    */
   private paintersIn(doc: Document): PainterIndex {
     const known = this.painters.get(doc);
     if (known !== undefined) return known;
-    const index: PainterIndex = { cells: new Map() };
+    const index: PainterIndex = { cells: new Map(), deferred: null };
     this.painters.set(doc, index);
     const view = doc.defaultView;
     if (view === null) return index;
     const [scrollX, scrollY] = [view.scrollX, view.scrollY];
-    const viewport: Rect = { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight };
-    let budget = PAINTER_LIMIT;
-    const add = (box: Rect, layer: Layer, fixed: boolean): void => {
-      if (budget <= 0 || (layer.color?.a === 0 && !layer.image)) return;
-      budget -= 1;
+    const [edgeX, edgeY] = [view.innerWidth, view.innerHeight];
+    const add = (box: Rect, layer: Layer, fixed: boolean, under: Element, fade: number): void => {
+      const alpha = (layer.color?.a ?? 1) * fade;
+      if (!layer.image && alpha === 0) return;
       // A fixed box that fills the viewport stays behind the text at every
       // scroll offset, so it covers the whole document; a smaller one only
       // covers where it sits.
       const spans = fixed && box.left <= 0 && box.top <= 0;
-      const rect: Rect = {
-        left: box.left + scrollX,
-        top: box.top + scrollY,
-        right:
-          spans && box.right >= viewport.right ? Number.POSITIVE_INFINITY : box.right + scrollX,
-        bottom:
-          spans && box.bottom >= viewport.bottom ? Number.POSITIVE_INFINITY : box.bottom + scrollY,
+      const wide = spans && box.right >= edgeX;
+      const tall = spans && box.bottom >= edgeY;
+      const painter: Painter = {
+        rect: {
+          left: wide ? OPEN.left : box.left + scrollX,
+          top: tall ? OPEN.top : box.top + scrollY,
+          right: wide ? OPEN.right : box.right + scrollX,
+          bottom: tall ? OPEN.bottom : box.bottom + scrollY,
+        },
+        layer: layer.image
+          ? layer
+          : { color: { ...(layer.color as RGBA), a: alpha }, image: false },
+        under,
       };
-      if (spans && rect.right === Number.POSITIVE_INFINITY) rect.left = Number.NEGATIVE_INFINITY;
-      if (spans && rect.bottom === Number.POSITIVE_INFINITY) rect.top = Number.NEGATIVE_INFINITY;
-      for (const key of cellsOf(rect)) {
+      for (const key of cellsOf(painter.rect)) {
         const list = index.cells.get(key);
-        if (list === undefined) index.cells.set(key, [{ rect, layer }]);
-        else list.push({ rect, layer });
+        if (list === undefined) index.cells.set(key, [painter]);
+        else if (list.push(painter) > CELL_LIMIT * 2) index.cells.set(key, largest(list));
       }
     };
-    const visit = (element: Element): void => {
+    const visit = (element: Element, fade: number, deferred: boolean): void => {
       const style = this.styleOf(element);
       if (style === null || style.getPropertyValue('display') === 'none') return;
+      const alpha = fade * opacityOf(style);
       const position = style.getPropertyValue('position');
-      if (position === 'absolute' || position === 'fixed')
-        add(
-          element.getBoundingClientRect(),
-          this.paintLayerOf(element, style),
-          position === 'fixed',
-        );
-      if (element.namespaceURI === HTML_NAMESPACE && own(NO_PSEUDO, element.localName) !== true) {
-        for (const which of ['before', 'after'] as const) {
-          const overlay = this.overlayOf(element, which);
-          if (overlay !== null) add(overlay.box, overlay.layer, overlay.fixed);
+      // A skipped subtree is size-contained, so the document's scroll area
+      // does not cover it although scrolling there renders it.
+      const skipped = deferred || style.getPropertyValue('content-visibility') === 'auto';
+      if (skipped) {
+        const box = element.getBoundingClientRect();
+        index.deferred = {
+          right: Math.max(index.deferred?.right ?? 0, box.right + scrollX),
+          bottom: Math.max(index.deferred?.bottom ?? 0, box.bottom + scrollY),
+        };
+      }
+      if (alpha > 0) {
+        if (position === 'absolute' || position === 'fixed') {
+          const under = this.containingBlockOf(flatParent(element), position === 'fixed');
+          if (under !== null)
+            add(
+              element.getBoundingClientRect(),
+              this.paintLayerOf(element, style),
+              position === 'fixed',
+              under,
+              alpha,
+            );
+        }
+        if (element.namespaceURI === HTML_NAMESPACE && own(NO_PSEUDO, element.localName) !== true) {
+          for (const which of ['before', 'after'] as const) {
+            const overlay = this.overlayOf(element, which);
+            if (overlay !== null)
+              add(overlay.box, overlay.layer, overlay.fixed, overlay.under, alpha);
+          }
         }
       }
-      for (const child of this.flatChildren(element)) visit(child);
+      for (const child of this.flatChildren(element)) visit(child, alpha, skipped);
     };
-    for (const child of doc.children) visit(child);
+    for (const child of doc.children) visit(child, 1, false);
     return index;
   }
 
@@ -915,14 +968,14 @@ class Extractor {
   }
 
   /**
-   * A positioned `::before` or `::after` and the box it covers: the usual
-   * overlay behind a hero's text. Its containing block is the nearest
-   * positioned ancestor, which is where its resolved insets are measured from.
+   * A positioned `::before` or `::after`, the box it covers and the element
+   * whose content it may lie under: the usual overlay behind a hero's text.
+   * Its containing block is where its resolved insets are measured from.
    */
   private overlayOf(
     element: Element,
     which: 'before' | 'after',
-  ): { box: Rect; layer: Layer; fixed: boolean } | null {
+  ): { box: Rect; layer: Layer; fixed: boolean; under: Element } | null {
     const pseudo = this.styleOf(element, which);
     if (pseudo === null) return null;
     const content = pseudo.getPropertyValue('content');
@@ -936,8 +989,10 @@ class Extractor {
       return null;
     const layer = this.layerOf(pseudo);
     if (!layer.image && layer.color?.a === 0) return null;
-    const container = this.containingBlockOf(element, position === 'fixed');
-    if (container === null) return null;
+    // A pseudo-element's containing block search starts at its own element.
+    const under = this.containingBlockOf(element, position === 'fixed');
+    const container = under === null ? null : this.paddingBoxOf(under);
+    if (under === null || container === null) return null;
     const inset = (name: string): number => {
       const value = Number.parseFloat(pseudo.getPropertyValue(name));
       return Number.isFinite(value) ? value : 0;
@@ -948,70 +1003,90 @@ class Extractor {
       right: container.right - inset('right'),
       bottom: container.bottom - inset('bottom'),
     };
-    return { box, layer, fixed: position === 'fixed' };
+    return { box, layer, fixed: position === 'fixed', under };
   }
 
-  /** The padding box a positioned descendant's insets are measured from. */
-  private containingBlockOf(element: Element, fixed: boolean): Rect | null {
-    const view = element.ownerDocument.defaultView;
-    for (let node: Element | null = element; node !== null; node = flatParent(node)) {
+  /**
+   * The element whose content a positioned box may paint under: its containing
+   * block. A fixed box is laid out against the viewport, so it belongs to the
+   * root element unless a transform makes an ancestor its containing block.
+   */
+  private containingBlockOf(start: Element | null, fixed: boolean): Element | null {
+    for (let node: Element | null = start; node !== null; node = flatParent(node)) {
       const style = this.styleOf(node);
       if (style === null) break;
-      const position = style.getPropertyValue('position');
       const transformed =
         style.getPropertyValue('transform') !== 'none' ||
         style.getPropertyValue('filter') !== 'none' ||
         style.getPropertyValue('perspective') !== 'none';
-      if (transformed || (!fixed && position !== 'static')) {
-        const box = node.getBoundingClientRect();
-        const edge = (name: string): number => Number.parseFloat(style.getPropertyValue(name)) || 0;
-        return {
-          left: box.left + edge('border-left-width'),
-          top: box.top + edge('border-top-width'),
-          right: box.right - edge('border-right-width'),
-          bottom: box.bottom - edge('border-bottom-width'),
-        };
-      }
+      if (transformed || (!fixed && style.getPropertyValue('position') !== 'static')) return node;
     }
-    return view === null
-      ? null
-      : { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight };
+    return (start ?? this.top.documentElement).ownerDocument.documentElement;
+  }
+
+  /** The box a container's content is laid out in. */
+  private paddingBoxOf(element: Element): Rect | null {
+    const style = this.styleOf(element);
+    if (style === null) return null;
+    const box = element.getBoundingClientRect();
+    const edge = (name: string): number => Number.parseFloat(style.getPropertyValue(name)) || 0;
+    return {
+      left: box.left + edge('border-left-width'),
+      top: box.top + edge('border-top-width'),
+      right: box.right - edge('border-right-width'),
+      bottom: box.bottom - edge('border-bottom-width'),
+    };
   }
 
   /**
    * The colors that may lie behind a piece of text, at most `BACKDROP_LIMIT`:
-   * the composite of its flat-tree ancestors, and that composite under every
-   * painter whose box covers the text. Text is kept when it contrasts with any
-   * of them, as in static mode. `null` when an image or an unreadable color is
-   * among them: contrast is then unknown.
+   * the composite of its flat-tree ancestors, and that composite with a
+   * painter slipped in under the ancestor it belongs to. Text is kept when it
+   * contrasts with any of them, as in static mode. `null` when an image or an
+   * unreadable color is among them: contrast is then unknown.
+   *
+   * A painter only counts for text inside its containing block, and only the
+   * backgrounds between that block and the text are painted over it, so an
+   * opaque background in between hides it, as it does on screen.
    */
   private backdropsFor(element: Element, point: [number, number] | null): RGBA[] | null {
     const base = this.backgroundOf(element);
-    if (base === null) return null;
-    if (point === null) return [base];
+    if (base === null || point === null) return base === null ? null : [base];
     const doc = element.ownerDocument;
     const view = doc.defaultView;
     const spot: [number, number] = [
       point[0] + (view?.scrollX ?? 0),
       point[1] + (view?.scrollY ?? 0),
     ];
-    const result = [base];
-    const seen = new Set([toHex(base)]);
     const index = this.paintersIn(doc);
     const nearby = [
       ...(index.cells.get(cellKey(spot[0], spot[1])) ?? []),
       ...(index.cells.get(EVERYWHERE) ?? []),
     ];
-    for (const painter of nearby) {
-      const { rect, layer } = painter;
+    if (nearby.length === 0) return [base];
+    const chain: Element[] = [];
+    for (let node: Element | null = element; node !== null; node = flatParent(node))
+      chain.push(node);
+    const result = [base];
+    const seen = new Set([toHex(base)]);
+    for (const { rect, layer, under } of nearby) {
+      const depth = chain.indexOf(under);
       if (
+        depth === -1 ||
         spot[0] < rect.left ||
         spot[0] > rect.right ||
         spot[1] < rect.top ||
         spot[1] > rect.bottom
       )
         continue;
-      const composite = this.layerOver(layer, base, 1);
+      let composite = this.layerOver(layer, this.backgroundOf(under), 1);
+      // The backgrounds between the containing block and the text paint over it.
+      for (let step = depth - 1; step >= 0 && composite !== null; step -= 1) {
+        const box = chain[step] as Element;
+        const style = this.styleOf(box);
+        composite =
+          style === null ? null : this.layerOver(this.paintLayerOf(box, style), composite, 1);
+      }
       if (composite === null) return null;
       const key = toHex(composite);
       if (result.length < BACKDROP_LIMIT && !seen.has(key)) {
@@ -1194,7 +1269,11 @@ class Extractor {
    * A box a reader can scroll, and how far its content can still be moved.
    * `overflow: hidden` is excluded: a script can scroll it, a reader cannot.
    */
-  private scrollportOf(element: Element, style: CSSStyleDeclaration): Scrollport | null {
+  private scrollportOf(
+    element: Element,
+    style: CSSStyleDeclaration,
+    transformed: boolean,
+  ): Scrollport | null {
     const scrolls = (axis: string): boolean => {
       const overflow = style.getPropertyValue(axis);
       return overflow === 'auto' || overflow === 'scroll';
@@ -1214,6 +1293,8 @@ class Extractor {
       right: x ? element.scrollWidth - element.clientWidth - element.scrollLeft : 0,
       top: y ? element.scrollTop : 0,
       bottom: y ? element.scrollHeight - element.clientHeight - element.scrollTop : 0,
+      absolute: style.getPropertyValue('position') !== 'static' || transformed,
+      fixed: transformed,
     };
   }
 
@@ -1241,8 +1322,7 @@ class Extractor {
   private placementOf(node: Node, rects: readonly Rect[], frame: Frame): Verdict | null {
     if (rects.length === 0) return null;
     const doc = node.ownerDocument ?? (node as Document);
-    const page = this.areaOf(doc);
-    const area: Rect = frame.deferred ? { ...page, right: OPEN.right, bottom: OPEN.bottom } : page;
+    const area = this.areaOf(doc);
     let reachable: Rect[] = [...rects];
     for (const port of [...frame.scrollports].reverse()) {
       const grown = reachable
@@ -1378,9 +1458,6 @@ class Extractor {
       (Number.isFinite(zoom) ? zoom : 1) *
       (matrix === null ? 1 : scaleOfMatrix(matrix, parent.perspective, this.viewOf(element)));
 
-    // A skipped `content-visibility: auto` subtree is size-contained, so it adds
-    // nothing to the document's scroll area although scrolling there renders it.
-    if (boxed && style.getPropertyValue('content-visibility') === 'auto') frame.deferred = true;
     if (boxed && style.getPropertyValue('content-visibility') === 'hidden') {
       const detail =
         element.getAttribute('hidden')?.toLowerCase() === 'until-found'
@@ -1427,8 +1504,16 @@ class Extractor {
       const clip =
         sized || namespace === SVG_NAMESPACE ? this.clipOf(element, style, transformed) : null;
       frame.clips = clip === null ? inherited : [...inherited, clip];
-      const port = sized ? this.scrollportOf(element, style) : null;
-      if (port !== null) frame.scrollports = [...parent.scrollports, port];
+      // A positioned box does not scroll with an ancestor that is not its
+      // containing block, so it does not borrow that scroller's range either.
+      const scrollers =
+        position === 'fixed'
+          ? parent.scrollports.filter((port) => port.fixed)
+          : position === 'absolute'
+            ? parent.scrollports.filter((port) => port.absolute)
+            : parent.scrollports;
+      const port = sized ? this.scrollportOf(element, style, transformed) : null;
+      frame.scrollports = port === null ? scrollers : [...scrollers, port];
     }
     return frame;
   }
@@ -1460,14 +1545,16 @@ class Extractor {
     const graphics = scope.svgText ? null : scope.svgGraphics;
     if (frame.subtree !== null) return frame.subtree;
     if (graphics !== null) return graphics;
-    if (node.data.trim() === '') return null;
-    const rects = this.rectsOf(node);
+    // White space has no rectangle worth placing, but the styles around it
+    // still draw it, and an engine renders none of it when they hide it.
+    const blank = node.data.trim() === '';
+    const rects = blank ? [] : this.rectsOf(node);
     return (
       this.placementOf(node, rects, frame) ??
       frame.visibility ??
       frame.font ??
       frame.color ??
-      this.contrastVerdict(frame.ink, centreOf(rects[0]))
+      (blank ? null : this.contrastVerdict(frame.ink, centreOf(rects[0])))
     );
   }
 

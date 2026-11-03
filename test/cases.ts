@@ -551,6 +551,52 @@ export const cases: Case[] = [
     html: '<div style="position: relative"><template shadowrootmode="open"><div style="position: absolute; inset: 0; background: #111"></div><p style="position: relative; color: #eee">shadow hero</p></template></div>',
     visible: 'shadow hero',
   },
+  {
+    name: 'a backdrop that paints nothing does not rescue text',
+    html: '<p style="color: #fff">white on white</p><div style="position: absolute; inset: 0; background: #000; opacity: 0"></div>',
+    visible: '',
+    hidden: [['low-contrast', 'white on white']],
+  },
+  {
+    name: 'a backdrop faded out by a filter or by an ancestor',
+    html: '<p style="color: #fff">filtered away</p><div style="position: absolute; inset: 0; background: #000; filter: opacity(0)"></div><p style="color: #fff">under a faded ancestor</p><div style="opacity: 0"><div style="position: absolute; inset: 0; background: #000"></div></div>',
+    visible: 'filtered away\n\nunder a faded ancestor',
+    diverges: [
+      {
+        where: 'browser',
+        visible: '',
+        hidden: [
+          ['low-contrast', 'filtered away'],
+          ['low-contrast', 'under a faded ancestor'],
+        ],
+        reason:
+          "Browser mode multiplies a box's own filter and its ancestors' opacity into the backdrop it paints, so a box that draws nothing rescues nothing; static mode models neither and keeps the text.",
+      },
+    ],
+  },
+  {
+    name: 'a backdrop an opaque background hides does not rescue text',
+    html: '<div style="background: #fff; position: relative; z-index: 1"><p style="color: #fff">white on white</p></div><div style="position: absolute; inset: 0; background: #000; z-index: 0"></div>',
+    visible: '',
+    hidden: [['low-contrast', 'white on white']],
+  },
+  {
+    name: 'a deferred subtree does not unbound a page that clips',
+    html: '<!doctype html><html style="overflow: hidden"><body><div style="height: 5000px"></div><div style="content-visibility: auto"><p style="margin-left: 99999px">far away</p></div></body></html>',
+    visible: '',
+    hidden: [['off-screen', 'far away']],
+  },
+  {
+    name: 'a fixed box does not borrow a scroll container range',
+    html: '<div id="box" style="width: 200px; height: 100px; overflow: auto"><div style="width: 5000px; height: 5000px"></div><p style="position: fixed; left: -3000px; top: 10px">escaped</p></div><script>box.scrollLeft = 3000; box.scrollTop = 3000</script>',
+    visible: '',
+    hidden: [['off-screen', 'escaped']],
+  },
+  {
+    name: 'white space inside a hidden box is not drawn',
+    html: '<p>a<span style="visibility: hidden"> </span>b</p><p>c<span style="font-size: 0"> </span>d</p>',
+    visible: 'ab\n\ncd',
+  },
   // Color and contrast.
   {
     name: 'white text on white, in every color syntax',

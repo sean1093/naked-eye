@@ -288,16 +288,22 @@ document, with a warning.
   `<iframe>` hides everything in it under that reason.
 - **Scrolling counts as reachable.** Text a reader can bring into view by
   scrolling the page, or a box with `overflow: auto` or `scroll`, is on screen,
-  whatever the current scroll offset; so is a `content-visibility: auto`
-  subtree past the end of the scroll area, which renders when scrolled to.
-  Only what no scrolling reaches — outside the document's scrollable area, or
-  cut off by `overflow: hidden`, `overflow: clip` or paint containment — is
-  reported as `off-screen` or `clipped`.
+  whatever the current scroll offset; a positioned box that does not scroll
+  with such an ancestor does not borrow its range. A `content-visibility: auto`
+  subtree past the end of the scroll area is reachable too, since scrolling
+  there renders it, but only as far as that subtree itself reaches and only on
+  an axis the page does not clip. Only what no scrolling reaches — outside the
+  document's scrollable area, or cut off by `overflow: hidden`, `overflow:
+  clip` or paint containment — is reported as `off-screen` or `clipped`.
 - **The backdrop is the set of boxes that may paint there.** As in static mode,
   text is kept when it contrasts with any of them: the composite of its
-  ancestors, and that composite under each positioned box, `::before` or
-  `::after` whose rectangle covers the text. A fixed box that fills the
-  viewport counts over the whole page; a smaller one only where it sits.
+  ancestors, and that composite with a positioned box, `::before` or `::after`
+  slipped in under the ancestor it is laid out in. Only a box whose containing
+  block is one of the text's ancestors and whose rectangle covers the text
+  counts, its own opacity and `filter: opacity()` and its ancestors' are
+  applied to it, and an opaque background between it and the text hides it, as
+  on screen. A fixed box that fills the viewport counts over the whole page; a
+  smaller one only where it sits.
 - **Generated content has no box to select.** `::before`, `::after`,
   `::first-line` and `::first-letter` are judged from their computed styles,
   with the backdrop read at the middle of the element they belong to rather

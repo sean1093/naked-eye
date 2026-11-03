@@ -134,6 +134,23 @@ describe.runIf(selected.length > 0)('the shared corpus in browser mode', () => {
         const large = await time(32_000);
         expect(large / small).toBeLessThan(10);
       });
+
+      it('keeps the page backdrop behind a crowd of small positioned boxes', async () => {
+        // More boxes than one grid cell holds, all in the top-left corner, so
+        // only a cap that prefers the larger box leaves the backdrop in place.
+        const crowd =
+          '<div style="position: absolute; left: 0; top: 0; width: 1px; height: 1px; background: rgba(255, 255, 255, 0.004)"></div>'.repeat(
+            1_100,
+          );
+        await page.setContent(
+          documentOf(
+            `${crowd}<div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><p style="color: #eee">dark theme text</p>`,
+          ),
+        );
+        await expect(extractVisibleFromPage(page)).resolves.toMatchObject({
+          text: 'dark theme text',
+        });
+      });
     });
   }
 });
