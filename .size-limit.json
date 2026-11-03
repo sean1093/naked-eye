@@ -1,0 +1,8 @@
+[
+  {
+    "name": "naked-eye (ESM with dependencies, gzipped)",
+    "path": "dist/index.js",
+    "limit": "1 kB",
+    "gzip": true
+  }
+]
