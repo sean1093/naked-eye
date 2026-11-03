@@ -135,12 +135,17 @@ describe('extractVisible', () => {
   });
 
   it('builds finding selectors in time linear in the number of siblings', () => {
-    const started = Date.now();
-    const { hidden } = extractVisible(
-      documentOf('<span style="display: none">x</span>'.repeat(20_000)),
-    );
-    expect(hidden).toHaveLength(20_000);
-    expect(Date.now() - started).toBeLessThan(2000);
+    const time = (count: number): number => {
+      const html = documentOf('<span style="display: none">x</span>'.repeat(count));
+      const started = performance.now();
+      expect(extractVisible(html).hidden).toHaveLength(count);
+      return performance.now() - started;
+    };
+    time(2_000);
+    // Four times the siblings: linear work takes about four times as long, quadratic sixteen.
+    const small = time(5_000);
+    const large = time(20_000);
+    expect(large / small).toBeLessThan(10);
   });
 
   it('removes soft hyphens without reporting them', () => {
