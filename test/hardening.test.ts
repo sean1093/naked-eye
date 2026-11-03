@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Display } from '../src/css/properties.js';
+import { extractVisible } from '../src/index.js';
 import { styled } from './helpers.js';
 
 const STANDARDS = '<!doctype html>';
@@ -191,6 +192,19 @@ describe('hostile input stays bounded', () => {
     const css = `${'a, b, c { '.repeat(depth)}& p { display: none }${' }'.repeat(depth)}`;
     const started = Date.now();
     expect(hidden(css, `${'<b>'.repeat(depth)}<p id=t>x`)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('shares inherited text-shadow lists instead of resolving them per element', () => {
+    const layers = Array.from(
+      { length: 2000 },
+      (_, index) => `0 0 #${index.toString(16).padStart(6, '0')}`,
+    ).join(', ');
+    const started = Date.now();
+    const result = extractVisible(
+      `${STANDARDS}<body style="text-shadow: ${layers}">${'<p>x</p>'.repeat(5000)}</body>`,
+    );
+    expect(result.text.length).toBeGreaterThan(0);
     expect(Date.now() - started).toBeLessThan(2000);
   });
 

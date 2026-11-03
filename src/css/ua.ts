@@ -8,6 +8,7 @@
  * Scripting is assumed enabled, as in a browser that a human uses, so
  * `<noscript>` content does not render.
  */
+import { parseLegacyColor, toHex } from './color.js';
 import { type Declaration, parseComponentValues } from './syntax.js';
 
 export const UA_STYLESHEET = `
@@ -55,6 +56,11 @@ small, sub, sup { font-size: smaller; }
 big { font-size: larger; }
 input, select, button, textarea { font-size: 13.333px; }
 
+a:any-link { color: LinkText; }
+mark { background-color: Mark; color: MarkText; }
+input, textarea, select { background-color: Field; color: FieldText; }
+button, input:is([type="button" i], [type="submit" i], [type="reset" i]) { background-color: ButtonFace; color: ButtonText; }
+
 pre, listing, xmp, plaintext { white-space: pre; }
 textarea { white-space: pre-wrap; }
 nobr { white-space: nowrap; }
@@ -74,7 +80,19 @@ const LEGACY_FONT_SIZES = [
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
 /** SVG presentation attributes that map to modeled properties. */
-const SVG_PRESENTATION = ['opacity', 'visibility', 'display', 'font-size', 'clip-path'];
+const SVG_PRESENTATION = [
+  'fill',
+  'fill-opacity',
+  'stroke',
+  'stroke-opacity',
+  'stroke-width',
+  'opacity',
+  'visibility',
+  'display',
+  'font-size',
+  'clip-path',
+  'color',
+];
 
 /** Units the SVG `transform` attribute leaves implicit: user units are px, angles are degrees. */
 const SVG_TRANSFORM_UNITS: Record<string, string[]> = {
@@ -119,6 +137,9 @@ function svgTransform(value: string): string | null {
   return functions.length === 0 || value.slice(consumed).trim() !== '' ? null : functions.join(' ');
 }
 
+/** Elements whose `bgcolor` attribute maps to `background-color`. */
+const BGCOLOR = ['body', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'marquee'];
+
 interface HintTarget {
   name: string;
   namespace?: string | undefined;
@@ -128,19 +149,25 @@ interface HintTarget {
 /**
  * Presentational hints: HTML and SVG attributes that map to CSS, applied
  * below every author rule. Attribute values are attacker-controlled, so each
- * one becomes exactly one declaration: `display="none; x: y"` is an invalid
- * display, never a second declaration.
+ * one becomes exactly one declaration: `fill="red; display: none"` is an
+ * invalid fill, never a second declaration.
  */
 export function presentationalHints({ name, namespace, attribs }: HintTarget): Declaration[] {
   const hints: Declaration[] = [];
   const add = (property: string, css: string): void => {
     hints.push({ name: property, value: parseComponentValues(css), important: false });
   };
+  const color = (property: string, attribute: string | undefined): void => {
+    const parsed = attribute === undefined ? null : parseLegacyColor(attribute);
+    if (parsed !== null) add(property, toHex(parsed));
+  };
   if (namespace === SVG_NAMESPACE) {
     for (const property of SVG_PRESENTATION) {
       const value = attribs[property];
       if (value === undefined) continue;
-      const unitless = property === 'font-size' && /^\s*[+-]?(\d+\.?\d*|\.\d+)\s*$/.test(value);
+      const unitless =
+        (property === 'font-size' || property === 'stroke-width') &&
+        /^\s*[+-]?(\d+\.?\d*|\.\d+)\s*$/.test(value);
       add(property, unitless ? `${value.trim()}px` : value);
     }
     if (attribs.transform !== undefined) {
@@ -149,14 +176,17 @@ export function presentationalHints({ name, namespace, attribs }: HintTarget): D
     }
     return hints;
   }
-  if (name === 'font' && attribs.size !== undefined) {
-    const match = /^\s*([+-]?)(\d+)/.exec(attribs.size);
+  if (name === 'font') {
+    color('color', attribs.color);
+    const match = attribs.size === undefined ? null : /^\s*([+-]?)(\d+)/.exec(attribs.size);
     if (match !== null) {
       const value = Number(match[2]);
       const size = match[1] === '+' ? 3 + value : match[1] === '-' ? 3 - value : value;
       add('font-size', LEGACY_FONT_SIZES[Math.min(7, Math.max(1, size)) - 1] as string);
     }
   }
+  if (name === 'body') color('color', attribs.text);
+  if (BGCOLOR.includes(name)) color('background-color', attribs.bgcolor);
   if ((name === 'td' || name === 'th') && attribs.nowrap !== undefined)
     add('white-space', 'nowrap');
   if (name === 'pre' && attribs.wrap !== undefined) add('white-space', 'pre-wrap');

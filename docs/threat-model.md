@@ -142,11 +142,23 @@ reach in a browser ([#4][i4]).
 
 | Technique | Example | Static | Browser | Reason | Issue |
 |---|---|---|---|---|---|
-| Transparent text | `color: transparent`, `-webkit-text-fill-color: transparent` | yes | yes | `transparent-text` | [#6][i6] |
-| Text the color of its background | white on white, in any color syntax | yes | yes | `low-contrast` | [#6][i6] |
+| Transparent text | `color: transparent`, `-webkit-text-fill-color: transparent`, SVG `fill-opacity: 0` | yes | yes | `transparent-text` | [#6][i6] |
+| Text the color of its background | white on white, in any color syntax, `<font color>`, SVG `fill` | yes | yes | `low-contrast` | [#6][i6] |
 
-A background image or gradient behind the text makes contrast unknowable
-without pixels, so the text is kept.
+Contrast is the WCAG ratio between the text, composited with its effective
+opacity, and the background behind it: translucent backgrounds of the element
+and its ancestors composited over the canvas. A stroke, a text shadow or a
+background clipped to the text (`background-clip: text`) that draws the glyphs
+in a visible color keeps the text; a stroke thinner than half a pixel or a
+shadow blurred wider than a quarter of the font size does not count. Fully
+transparent ink is reported whatever lies behind it. A background image or
+gradient behind the text makes contrast unknowable without pixels, so the text
+is kept.
+
+Without layout, static mode cannot tell exactly what lies behind text that is
+not an ancestor's background. A large absolutely positioned or fixed box with
+a background, and a table column's background, may lie behind any text in its
+containing block, so such text is kept when it contrasts with that box too.
 
 ### Characters that render as nothing
 
@@ -199,6 +211,19 @@ position, subject to the same hiding rules, and lists each insertion in
   through.
 - **Animations** other than the end state of fill-forwards animations, and
   **transitions**, are not modelled.
+- **Colors it cannot evaluate.** Relative color syntax (`rgb(from …)`),
+  `contrast-color()`, `device-cmyk()` and `color-mix()` in `display-p3`,
+  `a98-rgb`, `prophoto-rgb` or `rec2020` keep the text and add an
+  `unsupported-color` warning.
+- **Backdrops from positioned boxes.** Text is kept when it contrasts with any
+  large positioned box in its containing block, wherever that box lands. An
+  attacker who adds such a box in a contrasting color can make invisible text
+  count as visible; browser mode sees where the box is.
+- **Form constraints.** `:invalid` and `:valid` evaluate `required`, e-mail and
+  URL syntax, and number ranges and steps, but not `pattern`: a hostile pattern
+  could stall the regular expression engine.
+- **Shapes painted under SVG text** are not considered when judging its
+  contrast.
 
 ### Both modes
 

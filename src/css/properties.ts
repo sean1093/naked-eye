@@ -15,7 +15,15 @@ import {
 } from '@csstools/css-parser-algorithms';
 import { TokenType } from '@csstools/css-tokenizer';
 import { own } from '../util.js';
-import { type Context, type Expr, evaluate, isMathFunction, parseNumeric } from './calc.js';
+import {
+  type Context,
+  type Expr,
+  evaluate,
+  hasPercentage,
+  isMathFunction,
+  parseNumeric,
+} from './calc.js';
+import { type Color, parseColor, rgba } from './color.js';
 import { identOf, isToken, significant, splitCommas, stringOf, tokenOf } from './syntax.js';
 
 export type Display =
@@ -90,7 +98,27 @@ export interface Values {
   'padding-left': Expr;
   /** The `perspective` property: the distance children's 3D transforms are viewed from. */
   perspective: Expr | 'none';
+  color: Color;
+  'background-color': Color;
+  /** Whether any background layer paints an image (a gradient that is fully transparent does not). */
+  'background-image': boolean;
+  /** Whether any background layer is clipped to the glyphs of the text (`background-clip: text`). */
+  'background-clip': boolean;
+  '-webkit-text-fill-color': Color;
+  '-webkit-text-stroke-width': Expr;
+  '-webkit-text-stroke-color': Color;
+  /** Each shadow layer's color and blur radius. */
+  'text-shadow': { color: Color; blur: Expr }[];
+  'color-scheme': { light: boolean; dark: boolean } | 'normal';
+  /** SVG paint: a color, `none`, or a paint server this engine does not evaluate. */
+  fill: Paint;
+  'fill-opacity': Expr;
+  stroke: Paint;
+  'stroke-opacity': Expr;
+  'stroke-width': Expr;
 }
+
+export type Paint = Color | 'none' | 'other';
 
 export type Longhand = keyof Values;
 
@@ -682,6 +710,231 @@ function listKeyword(allowed: string[]) {
   });
 }
 
+const IMAGE_FUNCTIONS = [
+  'url',
+  'image',
+  'image-set',
+  '-webkit-image-set',
+  'cross-fade',
+  'element',
+  '-moz-element',
+  'paint',
+  '-webkit-gradient',
+];
+
+/** Whether a gradient paints anything: one whose every color stop is transparent does not. */
+function gradientPaints(args: ComponentValue[]): boolean {
+  const colors = splitCommas(args)
+    .map((part) =>
+      significant(part)
+        .map((node) => parseColor([node]))
+        .find((color) => color !== null),
+    )
+    .filter((color): color is Color => color !== undefined && color !== null);
+  return colors.length === 0 || colors.some((color) => color.kind !== 'rgba' || color.value.a > 0);
+}
+
+/** Whether a layer list paints an image. `null` when a layer is not an image at all. */
+function paintsImage(nodes: ComponentValue[]): boolean | null {
+  let paints = false;
+  for (const node of nodes) {
+    if (identOf(node) === 'none') continue;
+    if (tokenOf(node)?.[0] === TokenType.URL) {
+      paints = true;
+      continue;
+    }
+    if (!isFunctionNode(node)) return null;
+    const name = node.getName().toLowerCase();
+    if (name.endsWith('gradient') && name !== '-webkit-gradient')
+      paints ||= gradientPaints(node.value);
+    else if (IMAGE_FUNCTIONS.includes(name)) paints = true;
+    else return null;
+  }
+  return paints;
+}
+
+function parseBackgroundImage(nodes: ComponentValue[]): boolean | null {
+  let paints = false;
+  for (const layer of splitCommas(nodes).map(significant)) {
+    if (layer.length !== 1) return null;
+    const result = paintsImage(layer);
+    if (result === null) return null;
+    paints ||= result;
+  }
+  return paints;
+}
+
+const BACKGROUND_BOXES = ['border-box', 'padding-box', 'content-box'];
+const BACKGROUND_REPEATS = ['repeat-x', 'repeat-y', 'repeat', 'space', 'round', 'no-repeat'];
+const BACKGROUND_ATTACHMENTS = ['scroll', 'fixed', 'local'];
+const BACKGROUND_POSITIONS = ['left', 'right', 'top', 'bottom', 'center'];
+const BACKGROUND_SIZES = ['auto', 'cover', 'contain'];
+
+/**
+ * The `background` shorthand: its color, and whether any layer paints an
+ * image. Every component must be valid, or a browser drops the declaration
+ * and the background cascaded before it keeps painting.
+ */
+function parseBackground(nodes: ComponentValue[]): Partial<Values> | null {
+  const layers = splitCommas(nodes).map(significant);
+  let color: Color | null = null;
+  let image = false;
+  for (const [index, layer] of layers.entries()) {
+    if (layer.length === 0) return null;
+    const counts = { image: 0, color: 0, attachment: 0, box: 0, repeat: 0, position: 0 };
+    let position: 'none' | 'open' | 'closed' = 'none';
+    for (let at = 0; at < layer.length; at += 1) {
+      const node = layer[at] as ComponentValue;
+      const word = identOf(node);
+      const isPosition =
+        (word !== undefined && BACKGROUND_POSITIONS.includes(word)) ||
+        lengthPercentage(node, false) !== null;
+      if (isPosition && position !== 'closed') {
+        position = 'open';
+        counts.position += 1;
+        continue;
+      }
+      if (position === 'open') position = 'closed';
+      if (isToken(node, TokenType.Delim) && stringOf(node) === '/') {
+        // A size follows the position directly: one or two values, or cover or contain alone.
+        if (at === 0 || counts.position === 0 || position !== 'closed') return null;
+        const sizes: ComponentValue[] = [];
+        while (sizes.length < 2) {
+          const next = layer[at + 1];
+          const size = identOf(next);
+          const valid =
+            next !== undefined &&
+            ((size !== undefined && BACKGROUND_SIZES.includes(size)) ||
+              lengthPercentage(next, false, true) !== null);
+          if (valid === false) break;
+          sizes.push(next as ComponentValue);
+          at += 1;
+        }
+        const words = sizes.map((size) => identOf(size));
+        if (
+          sizes.length === 0 ||
+          (sizes.length === 2 && words.some((size) => size === 'cover' || size === 'contain'))
+        )
+          return null;
+        continue;
+      }
+      if (word !== undefined && BACKGROUND_REPEATS.includes(word)) counts.repeat += 1;
+      else if (word !== undefined && BACKGROUND_ATTACHMENTS.includes(word)) counts.attachment += 1;
+      else if (word !== undefined && BACKGROUND_BOXES.includes(word)) counts.box += 1;
+      else {
+        const paints = paintsImage([node]);
+        if (paints !== null) {
+          counts.image += 1;
+          image ||= paints;
+          continue;
+        }
+        const parsed = parseColor([node]);
+        if (parsed === null || index !== layers.length - 1) return null;
+        counts.color += 1;
+        color = parsed;
+      }
+    }
+    if (
+      counts.image > 1 ||
+      counts.color > 1 ||
+      counts.attachment > 1 ||
+      counts.box > 2 ||
+      counts.repeat > 2 ||
+      counts.position > 4
+    )
+      return null;
+  }
+  return {
+    'background-color': color ?? rgba(0, 0, 0, 0),
+    'background-image': image,
+    'background-clip': false,
+  };
+}
+
+/** `background-clip`: whether any layer is clipped to the text. */
+function parseBackgroundClip(nodes: ComponentValue[]): boolean | null {
+  let text = false;
+  for (const layer of splitCommas(nodes).map(significant)) {
+    const word = layer.length === 1 ? identOf(layer[0]) : undefined;
+    if (word === 'text') text = true;
+    else if (word === undefined || BACKGROUND_BOXES.includes(word) === false) return null;
+  }
+  return text;
+}
+
+const STROKE_KEYWORDS: Record<string, number> = { thin: 1, medium: 3, thick: 5 };
+
+function strokeWidth(node: ComponentValue | undefined): Expr | null {
+  const keyword = own(STROKE_KEYWORDS, identOf(node) ?? '');
+  if (keyword !== undefined) return { op: 'value', value: keyword, unit: 'px' };
+  return lengthPercentage(node, false, true);
+}
+
+/** `text-shadow`: per layer, an optional color first or last and two or three lengths. */
+function parseShadows(nodes: ComponentValue[]): Values['text-shadow'] | null {
+  if (identOf(single(nodes) ?? undefined) === 'none') return [];
+  const shadows: Values['text-shadow'] = [];
+  for (const part of splitCommas(nodes).map(significant)) {
+    let color: Color | null = null;
+    const lengths: Expr[] = [];
+    for (const [index, node] of part.entries()) {
+      const parsed = parseColor([node]);
+      if (parsed !== null && color === null && (index === 0 || index === part.length - 1)) {
+        color = parsed;
+        continue;
+      }
+      // Offsets and blur are lengths; a percentage makes the declaration invalid.
+      const length = lengthPercentage(node, false);
+      if (length === null || hasPercentage(length)) return null;
+      lengths.push(length);
+    }
+    const blur = lengths[2] ?? ZERO;
+    if (lengths.length < 2 || lengths.length > 3 || (blur.op === 'value' && blur.value < 0))
+      return null;
+    shadows.push({ color: color ?? { kind: 'currentcolor' }, blur });
+  }
+  return shadows;
+}
+
+function parseColorScheme(nodes: ComponentValue[]): Values['color-scheme'] | null {
+  const words = nodes.map((node) => identOf(node));
+  if (words.length === 1 && words[0] === 'normal') return 'normal';
+  if (words.length === 0 || words.includes(undefined) || words.includes('normal')) return null;
+  return { light: words.includes('light'), dark: words.includes('dark') };
+}
+
+function parsePaint(nodes: ComponentValue[]): Paint | null {
+  const word = identOf(single(nodes) ?? undefined);
+  if (word === 'none') return 'none';
+  if (word === 'context-fill' || word === 'context-stroke') return 'other';
+  const first = nodes[0];
+  const isUrl =
+    tokenOf(first)?.[0] === TokenType.URL ||
+    (first !== undefined && isFunctionNode(first) && first.getName().toLowerCase() === 'url');
+  if (isUrl) return nodes.length <= 2 ? 'other' : null;
+  return parseColor(nodes);
+}
+
+function parseStroke(nodes: ComponentValue[]): Partial<Values> | null {
+  let width: Expr | null = null;
+  let color: Color | null = null;
+  for (const node of nodes) {
+    const parsed = parseColor([node]);
+    if (parsed !== null && color === null) {
+      color = parsed;
+      continue;
+    }
+    if (width !== null) return null;
+    width = strokeWidth(node);
+    if (width === null) return null;
+  }
+  if (nodes.length === 0) return null;
+  return {
+    '-webkit-text-stroke-width': width ?? ZERO,
+    '-webkit-text-stroke-color': color ?? { kind: 'currentcolor' },
+  };
+}
+
 export const LONGHANDS: Definitions = {
   display: {
     inherited: false,
@@ -841,6 +1094,52 @@ export const LONGHANDS: Definitions = {
       identOf(single(nodes) ?? undefined) === 'none'
         ? 'none'
         : lengthPercentage(single(nodes) ?? undefined, false, true),
+  },
+  color: {
+    inherited: true,
+    initial: { kind: 'scheme', light: rgba(0, 0, 0), dark: rgba(1, 1, 1) },
+    parse: (nodes) => parseColor(nodes),
+  },
+  'background-color': {
+    inherited: false,
+    initial: rgba(0, 0, 0, 0),
+    parse: (nodes) => parseColor(nodes),
+  },
+  'background-image': { inherited: false, initial: false, parse: parseBackgroundImage },
+  'background-clip': { inherited: false, initial: false, parse: parseBackgroundClip },
+  '-webkit-text-fill-color': {
+    inherited: true,
+    initial: { kind: 'currentcolor' },
+    parse: (nodes) => parseColor(nodes),
+  },
+  '-webkit-text-stroke-width': {
+    inherited: true,
+    initial: ZERO,
+    parse: (nodes) => strokeWidth(single(nodes) ?? undefined),
+  },
+  '-webkit-text-stroke-color': {
+    inherited: true,
+    initial: { kind: 'currentcolor' },
+    parse: (nodes) => parseColor(nodes),
+  },
+  'text-shadow': { inherited: true, initial: [], parse: parseShadows },
+  'color-scheme': { inherited: true, initial: 'normal', parse: parseColorScheme },
+  fill: { inherited: true, initial: rgba(0, 0, 0), parse: parsePaint },
+  'fill-opacity': {
+    inherited: true,
+    initial: ONE,
+    parse: (nodes) => numberOrPercentage(single(nodes) ?? undefined),
+  },
+  stroke: { inherited: true, initial: 'none', parse: parsePaint },
+  'stroke-opacity': {
+    inherited: true,
+    initial: ONE,
+    parse: (nodes) => numberOrPercentage(single(nodes) ?? undefined),
+  },
+  'stroke-width': {
+    inherited: true,
+    initial: { op: 'value', value: 1, unit: 'px' },
+    parse: (nodes) => lengthPercentage(single(nodes) ?? undefined, false, true),
   },
 };
 
@@ -1015,6 +1314,8 @@ export const SHORTHANDS: Record<
     if (sizes.length === 0 || sizes.length > 2 || sizes.includes(null)) return null;
     return { 'contain-intrinsic-height': sizes[sizes.length - 1] as boolean };
   },
+  background: (nodes) => parseBackground(nodes),
+  '-webkit-text-stroke': (nodes) => parseStroke(nodes),
 };
 
 export type Parsed = Partial<Values>;
@@ -1024,6 +1325,7 @@ export type Parsed = Partial<Values>;
  * horizontal, left-to-right writing mode this engine assumes.
  */
 const ALIASES: Record<string, string> = {
+  '-webkit-background-clip': 'background-clip',
   '-webkit-filter': 'filter',
   '-webkit-transform': 'transform',
   '-webkit-clip-path': 'clip-path',
@@ -1121,6 +1423,10 @@ export function longhandsOf(alias: string): Longhand[] {
       return ['padding-top', 'padding-bottom'];
     case 'padding-inline':
       return ['padding-left', 'padding-right'];
+    case 'background':
+      return ['background-color', 'background-image', 'background-clip'];
+    case '-webkit-text-stroke':
+      return ['-webkit-text-stroke-width', '-webkit-text-stroke-color'];
     case 'animation':
       return [
         'animation-name',
