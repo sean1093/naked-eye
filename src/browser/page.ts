@@ -8,7 +8,16 @@
  * Everything here runs in the page's main world and may only use DOM APIs and
  * the modules it imports; the thresholds are the only input.
  */
-import { contrast, DARK_CANVAS, LIGHT_CANVAS, over, type RGBA, toHex } from '../css/color.js';
+import {
+  contrast,
+  DARK_CANVAS,
+  LIGHT_CANVAS,
+  MAX_SHADOW_BLUR,
+  MIN_STROKE,
+  over,
+  type RGBA,
+  toHex,
+} from '../css/color.js';
 import {
   BOXLESS,
   FALLBACK,
@@ -20,7 +29,14 @@ import {
   SVG_NAMESPACE,
   SVG_TEXT,
 } from '../elements.js';
-import { assemble, type Layout, type RenderNode, type Space, type Verdict } from '../render.js';
+import {
+  assemble,
+  hideFirstLetter,
+  type Layout,
+  type RenderNode,
+  type Space,
+  type Verdict,
+} from '../render.js';
 import type { ExtractResult, HiddenReason, Warning, WarningCode } from '../types.js';
 import { MAY_CONTAIN_INVISIBLE } from '../unicode.js';
 import { own } from '../util.js';
@@ -107,6 +123,9 @@ interface Display {
   role: string;
 }
 
+/** The pseudo-elements browser mode reads styles for. */
+type Pseudo = 'before' | 'after' | 'first-line' | 'first-letter';
+
 function parseDisplay(value: string): Display {
   if (value === 'none' || value === 'contents')
     return { kind: value, outer: 'block', inner: 'flow', role: '' };
@@ -121,6 +140,15 @@ function parseDisplay(value: string): Display {
     inner: words.find((word) => word !== 'inline' && word !== 'block') ?? 'flow',
     role: '',
   };
+}
+
+/** Boxes `::first-line` and `::first-letter` apply to: block containers. */
+function isBlockContainer(display: Display, blockified: boolean): boolean {
+  if (display.kind === 'internal')
+    return display.role === 'table-cell' || display.role === 'table-caption';
+  if (display.kind !== 'box') return false;
+  if (display.inner === 'flow-root') return true;
+  return display.inner === 'flow' && (blockified || display.outer !== 'inline');
 }
 
 /** A rectangle in viewport coordinates; an edge nothing cuts off is infinite. */
@@ -148,6 +176,32 @@ interface Clip {
   fixed: boolean;
 }
 
+/** The background a box paints: a color, or an image that hides what is behind it. */
+interface Layer {
+  color: RGBA | null;
+  image: boolean;
+}
+
+const TRANSPARENT: RGBA = { r: 0, g: 0, b: 0, a: 0 };
+const CLEAR: Layer = { color: TRANSPARENT, image: false };
+
+/**
+ * What draws the glyphs of a run of text, and where a finding about it points.
+ * The backdrop is not known yet: it depends on where the text actually lands,
+ * so contrast is measured at the text node.
+ */
+interface Ink {
+  /** Every ink that draws the glyphs, with the effective opacity applied; all visible. */
+  painted: readonly RGBA[];
+  /** The fill, for the finding's detail. */
+  fill: RGBA;
+  element: Element;
+  /** The pseudo-element the finding names, when the ink is a pseudo-element's. */
+  selector: string | undefined;
+  /** Identical inks share one finding, as in static mode. */
+  key: string;
+}
+
 /** What an element passes down to its content. */
 interface Frame {
   /** Everything inside is hidden. */
@@ -156,8 +210,10 @@ interface Frame {
   silent: boolean;
   visibility: Verdict | null;
   font: Verdict | null;
-  /** Text color invisible against the background. */
+  /** Ink that is fully transparent, which no backdrop can make visible. */
   color: Verdict | null;
+  /** The ink whose contrast against its backdrop is still to be measured. */
+  ink: Ink | null;
   opacity: number;
   /** The accumulated scale of the ancestors' transforms and zoom. */
   scale: number;
@@ -181,6 +237,7 @@ const ROOT_FRAME: Frame = {
   visibility: null,
   font: null,
   color: null,
+  ink: null,
   opacity: 1,
   scale: 1,
   perspective: null,
@@ -207,23 +264,22 @@ function splitTop(value: string): string[] {
   return parts.map((part) => part.trim()).filter((part) => part !== '');
 }
 
-/** The first and the last whitespace-separated token of a value, functions kept whole. */
-function edgeTokens(value: string): string[] {
-  const text = value.trim();
-  if (text === '') return [];
+/** The whitespace-separated tokens of a value, with functions kept whole. */
+function spaceTokens(value: string): string[] {
+  const tokens: string[] = [];
   let depth = 0;
-  let last = 0;
-  let first = text.length;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
+  let start = 0;
+  for (let index = 0; index <= value.length; index += 1) {
+    const character = value[index];
     if (character === '(') depth += 1;
     else if (character === ')') depth -= 1;
-    else if (character === ' ' && depth === 0) {
-      if (first === text.length) first = index;
-      last = index + 1;
+    else if ((character === undefined || character === ' ') && depth === 0) {
+      const token = value.slice(start, index).trim();
+      if (token !== '') tokens.push(token);
+      start = index + 1;
     }
   }
-  return first === text.length ? [text] : [text.slice(0, first), text.slice(last)];
+  return tokens;
 }
 
 /** A `<length-percentage>` of a computed shape, split into its two possible units. */
@@ -486,7 +542,8 @@ class Extractor {
   /** Fragments and documents that are not reachable through `parentNode`. */
   private readonly hosts = new WeakMap<Node, Element>();
   private readonly selectorOf = createSelector(this.hosts);
-  private readonly backgrounds = new WeakMap<Element, RGBA | null>();
+  private readonly textClips = new WeakMap<Element, RGBA | null | undefined>();
+  private readonly canvases = new WeakMap<Document, RGBA | null>();
   private readonly areas = new WeakMap<Document, Rect>();
   private readonly ranges = new WeakMap<Document, Range>();
   private readonly warnings: Warning[] = [];
@@ -523,7 +580,7 @@ class Extractor {
    * `null` only for an element of a document with no browsing context, which a
    * `<template>`'s contents belong to: nothing there is ever rendered.
    */
-  private styleOf(element: Element, pseudo?: 'before' | 'after'): CSSStyleDeclaration | null {
+  private styleOf(element: Element, pseudo?: Pseudo): CSSStyleDeclaration | null {
     const view = element.ownerDocument.defaultView;
     return view === null ? null : view.getComputedStyle(element, pseudo ? `::${pseudo}` : null);
   }
@@ -575,103 +632,308 @@ class Extractor {
   }
 
   /**
-   * The opaque color behind an element's content: its background and its
-   * ancestors' composited over the canvas. `null` when an image is in the way
-   * or a color cannot be read: contrast is then unknown.
+   * The background a box paints: none when it is clipped to the text, which
+   * draws the glyphs instead, or when the box is invisible.
    */
-  private backgroundOf(element: Element): RGBA | null {
-    const cached = this.backgrounds.get(element);
-    if (cached !== undefined || this.backgrounds.has(element)) return cached ?? null;
-    const style = this.styleOf(element);
+  private layerOf(style: CSSStyleDeclaration): Layer {
+    if (
+      style.getPropertyValue('background-clip') === 'text' ||
+      style.getPropertyValue('visibility') !== 'visible'
+    )
+      return CLEAR;
+    return {
+      color: this.paint(style.getPropertyValue('background-color')),
+      image: this.obscures(style.getPropertyValue('background-image')),
+    };
+  }
+
+  /** The same, for an element, after the background propagation to the canvas. */
+  private paintLayerOf(element: Element, style: CSSStyleDeclaration): Layer {
+    const doc = element.ownerDocument;
+    // The root's background is the canvas; a transparent root propagates the
+    // body's there instead, and the body then paints none of its own.
+    if (element === doc.documentElement) return CLEAR;
+    if (element === doc.body && this.rootIsClear(doc)) return CLEAR;
+    return this.layerOf(style);
+  }
+
+  /** Whether the root element paints nothing, so that the body's background reaches the canvas. */
+  private rootIsClear(doc: Document): boolean {
+    const style = this.styleOf(doc.documentElement);
+    if (style === null) return true;
+    if (style.getPropertyValue('background-clip') === 'text') return true;
+    const color = this.paint(style.getPropertyValue('background-color'));
+    return !this.obscures(style.getPropertyValue('background-image')) && color?.a === 0;
+  }
+
+  /** The page canvas: the root's background, or the body's when the root paints none. */
+  private canvasOf(doc: Document): RGBA | null {
+    const known = this.canvases.get(doc);
+    if (known !== undefined) return known;
+    const root = doc.documentElement;
+    const style = this.styleOf(root);
+    const source = this.rootIsClear(doc) && doc.body !== null ? doc.body : root;
+    const sourceStyle = source === root ? style : this.styleOf(source);
     let result: RGBA | null = null;
-    if (style !== null) {
-      const color = this.paint(style.getPropertyValue('background-color'));
-      if (this.obscures(style.getPropertyValue('background-image')) || color === null)
-        result = null;
-      else if (color.a >= 1) result = color;
-      else {
-        const parent = flatParent(element);
-        const below = parent === null ? this.canvasOf(element, style) : this.backgroundOf(parent);
-        result = below === null ? null : color.a === 0 ? below : over(color, below);
-      }
+    if (style !== null && sourceStyle !== null) {
+      // `color-scheme` lists the schemes the page supports; the browser uses
+      // the reader's preferred one when it is listed, the first otherwise.
+      const supported = style
+        .getPropertyValue('color-scheme')
+        .split(/\s+/)
+        .filter((word) => word === 'light' || word === 'dark');
+      const prefersDark =
+        supported.includes('dark') &&
+        (!supported.includes('light') ||
+          this.viewOf(root).matchMedia('(prefers-color-scheme: dark)').matches);
+      const base = prefersDark ? DARK_CANVAS : LIGHT_CANVAS;
+      const color = this.paint(sourceStyle.getPropertyValue('background-color'));
+      const image = this.obscures(sourceStyle.getPropertyValue('background-image'));
+      const clipped = sourceStyle.getPropertyValue('background-clip') === 'text';
+      result = image
+        ? null
+        : color === null
+          ? null
+          : clipped || color.a === 0
+            ? base
+            : over(color, base);
     }
-    this.backgrounds.set(element, result);
+    this.canvases.set(doc, result);
     return result;
   }
 
-  /**
-   * The page canvas behind the root element. `color-scheme` lists the schemes
-   * the page supports; the browser uses the reader's preferred one when it is
-   * listed, and the first listed one otherwise.
-   */
-  private canvasOf(root: Element, style: CSSStyleDeclaration): RGBA {
-    const supported = style
-      .getPropertyValue('color-scheme')
-      .split(/\s+/)
-      .filter((word) => word === 'light' || word === 'dark');
-    if (!supported.includes('dark')) return LIGHT_CANVAS;
-    const prefersDark =
-      this.viewOf(root).matchMedia('(prefers-color-scheme: dark)').matches === true;
-    return prefersDark || !supported.includes('light') ? DARK_CANVAS : LIGHT_CANVAS;
+  /** The element itself and its flat-tree ancestors, innermost first. */
+  private chainOf(node: Node): Element[] {
+    const chain: Element[] = [];
+    let element = node.nodeType === ELEMENT ? (node as Element) : flatParent(node);
+    while (element !== null) {
+      chain.push(element);
+      element = flatParent(element);
+    }
+    return chain;
   }
 
-  /** Transparent or low-contrast text: every ink that draws the glyphs is invisible. */
-  private colorVerdict(
+  /**
+   * The opaque color painted under a point. The flat-tree ancestors always lie
+   * behind the text; hit-testing the point adds the boxes that lie behind it
+   * without being anybody's ancestor, which is how an overlay, a dark theme
+   * layer or a table column paints behind text. Hit-testing does not reach
+   * into shadow trees or outside the viewport, so the two are merged: each
+   * hit keeps its place between the ancestors it was reported between.
+   * `null` when an image or an unreadable color is in the way.
+   */
+  private backdropAt(point: [number, number] | null, element: Element): RGBA | null {
+    const doc = element.ownerDocument;
+    const view = doc.defaultView;
+    const chain = this.chainOf(element);
+    const family = new Set(chain);
+    const reachable =
+      point !== null &&
+      view !== null &&
+      point[0] >= 0 &&
+      point[1] >= 0 &&
+      point[0] <= view.innerWidth &&
+      point[1] <= view.innerHeight;
+    const hits = reachable && point !== null ? doc.elementsFromPoint(point[0], point[1]) : [];
+    // Everything above the text is in front of it, which is occlusion, not a backdrop.
+    const start = hits.findIndex((hit) => family.has(hit));
+    const below = start === -1 ? [] : hits.slice(start);
+    const stack: Element[] = [];
+    let cursor = 0;
+    for (const ancestor of chain) {
+      const at = below.indexOf(ancestor, cursor);
+      if (at === -1) {
+        stack.push(ancestor);
+        continue;
+      }
+      for (let index = cursor; index <= at; index += 1) stack.push(below[index] as Element);
+      cursor = at + 1;
+    }
+    let backdrop = this.canvasOf(doc);
+    // The stack is topmost first, so paint from the bottom upwards.
+    for (const box of stack.reverse()) {
+      const style = this.styleOf(box);
+      if (backdrop === null || style === null) break;
+      // An ancestor's opacity already applies to the text itself.
+      const alpha = family.has(box) ? 1 : Number.parseFloat(style.getPropertyValue('opacity'));
+      const fade = Number.isFinite(alpha) ? alpha : 1;
+      // A column's background paints above the table's and below the cell's.
+      const column = this.columnOf(box);
+      if (column !== null) backdrop = this.layerOver(column, backdrop, 1);
+      backdrop = this.layerOver(this.paintLayerOf(box, style), backdrop, fade);
+      if (point !== null) {
+        for (const which of ['before', 'after'] as const) {
+          const overlay = this.overlayLayerOf(box, style, which, point);
+          if (overlay !== null) backdrop = this.layerOver(overlay, backdrop, fade);
+        }
+      }
+    }
+    return backdrop;
+  }
+
+  /** Composites one background layer over the backdrop; `null` when it hides what is below. */
+  private layerOver(layer: Layer, backdrop: RGBA | null, fade: number): RGBA | null {
+    if (backdrop === null || layer.image || layer.color === null) return null;
+    const alpha = layer.color.a * fade;
+    return alpha === 0 ? backdrop : over({ ...layer.color, a: alpha }, backdrop);
+  }
+
+  /** The `<col>` or `<colgroup>` background that paints behind a table cell. */
+  private columnOf(element: Element): Layer | null {
+    const name = element.localName;
+    if (element.namespaceURI !== HTML_NAMESPACE || (name !== 'td' && name !== 'th')) return null;
+    const cell = element as HTMLTableCellElement;
+    const table = cell.closest('table');
+    if (table === null) return null;
+    let index = 0;
+    for (const group of table.querySelectorAll('colgroup, col')) {
+      if (group.localName === 'colgroup' && group.querySelector('col') !== null) continue;
+      const span = Number.parseInt(group.getAttribute('span') ?? '1', 10);
+      index += Number.isFinite(span) && span > 0 ? span : 1;
+      if (index > cell.cellIndex) {
+        const style = this.styleOf(group);
+        return style === null ? null : this.paintLayerOf(group, style);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A positioned `::before` or `::after` whose box covers a point: the usual
+   * overlay behind a hero's text. Only an overlay inside an element that is
+   * its own containing block can be located, so any other is left out.
+   */
+  private overlayLayerOf(
     element: Element,
     style: CSSStyleDeclaration,
-    opacity: number,
-    parent: Frame,
-    selector: string | undefined,
-  ): Verdict | null {
-    const background = this.backgroundOf(element);
-    if (background === null) return null;
+    which: 'before' | 'after',
+    point: [number, number],
+  ): Layer | null {
+    if (element.namespaceURI !== HTML_NAMESPACE || own(NO_PSEUDO, element.localName) === true)
+      return null;
+    const pseudo = this.styleOf(element, which);
+    if (pseudo === null) return null;
+    const content = pseudo.getPropertyValue('content');
+    const position = pseudo.getPropertyValue('position');
+    if (
+      content === '' ||
+      content === 'none' ||
+      pseudo.getPropertyValue('display') === 'none' ||
+      (position !== 'absolute' && position !== 'fixed') ||
+      style.getPropertyValue('position') === 'static'
+    )
+      return null;
+    const box = element.getBoundingClientRect();
+    const edge = (name: string): number => Number.parseFloat(style.getPropertyValue(name)) || 0;
+    const inset = (name: string, fallback: number): number => {
+      const value = Number.parseFloat(pseudo.getPropertyValue(name));
+      return Number.isFinite(value) ? value : fallback;
+    };
+    const left = box.left + edge('border-left-width') + inset('left', 0);
+    const top = box.top + edge('border-top-width') + inset('top', 0);
+    const right = box.right - edge('border-right-width') - inset('right', 0);
+    const bottom = box.bottom - edge('border-bottom-width') - inset('bottom', 0);
+    if (point[0] < left || point[0] > right || point[1] < top || point[1] > bottom) return null;
+    return this.layerOf(pseudo);
+  }
+
+  /**
+   * The ink a background clipped to the text paints the glyphs with, taken
+   * from the element or an ancestor: `null` for an image or an unreadable
+   * color, `undefined` when there is none.
+   */
+  private textClipOf(element: Element): RGBA | null | undefined {
+    if (this.textClips.has(element)) return this.textClips.get(element);
+    const style = this.styleOf(element);
+    let ink: RGBA | null | undefined;
+    const parent = flatParent(element);
+    if (style === null) ink = undefined;
+    else if (style.getPropertyValue('background-clip') === 'text') {
+      const image = this.obscures(style.getPropertyValue('background-image'));
+      const color = this.paint(style.getPropertyValue('background-color'));
+      if (image) ink = null;
+      else if (color === null || color.a !== 0) ink = color;
+      else ink = parent === null ? undefined : this.textClipOf(parent);
+    } else ink = parent === null ? undefined : this.textClipOf(parent);
+    this.textClips.set(element, ink);
+    return ink;
+  }
+
+  /**
+   * The inks that draw an element's glyphs: the fill, a stroke thick enough
+   * to be legible, shadows sharp enough to be legible, and a background
+   * clipped to the text. One unreadable color makes the whole set unknown.
+   */
+  private inksOf(element: Element, style: CSSStyleDeclaration, scale: number): (RGBA | null)[] {
     const inks: (RGBA | null)[] = [];
-    const withAlpha = (ink: RGBA | null, alpha: number): RGBA | null =>
-      ink === null ? null : { ...ink, a: ink.a * alpha };
     const amount = (name: string, fallback: number): number => {
       const parsed = Number.parseFloat(style.getPropertyValue(name));
       return Number.isFinite(parsed) ? parsed : fallback;
     };
+    const withAlpha = (ink: RGBA | null, alpha: number): RGBA | null =>
+      ink === null ? null : { ...ink, a: ink.a * alpha };
     if (element.namespaceURI === SVG_NAMESPACE) {
       const fill = style.getPropertyValue('fill');
       if (fill !== 'none') inks.push(withAlpha(this.paint(fill), amount('fill-opacity', 1)));
       const stroke = style.getPropertyValue('stroke');
-      if (stroke !== 'none' && amount('stroke-width', 0) > 0)
+      if (stroke !== 'none' && amount('stroke-width', 0) * scale >= MIN_STROKE)
         inks.push(withAlpha(this.paint(stroke), amount('stroke-opacity', 1)));
-    } else {
-      const fill = style.getPropertyValue('-webkit-text-fill-color');
-      inks.push(this.paint(fill === '' ? style.getPropertyValue('color') : fill));
-      if (amount('-webkit-text-stroke-width', 0) > 0)
-        inks.push(this.paint(style.getPropertyValue('-webkit-text-stroke-color')));
-      const shadows = style.getPropertyValue('text-shadow');
-      if (shadows !== '' && shadows !== 'none') {
-        for (const shadow of splitTop(shadows)) {
-          const color = edgeTokens(shadow)
-            .map((token) => this.paint(token))
-            .find((parsed) => parsed !== null);
-          inks.push(color ?? null);
-        }
+      return inks;
+    }
+    const fill = style.getPropertyValue('-webkit-text-fill-color');
+    inks.push(this.paint(fill === '' ? style.getPropertyValue('color') : fill));
+    // A hairline stroke, or a shadow blurred far wider than the glyphs, draws nothing legible.
+    if (amount('-webkit-text-stroke-width', 0) * scale >= MIN_STROKE)
+      inks.push(this.paint(style.getPropertyValue('-webkit-text-stroke-color')));
+    const shadows = style.getPropertyValue('text-shadow');
+    if (shadows !== '' && shadows !== 'none') {
+      const limit = amount('font-size', 0) * MAX_SHADOW_BLUR;
+      for (const shadow of splitTop(shadows)) {
+        const tokens = spaceTokens(shadow);
+        const lengths = tokens.filter((token) => /^-?[\d.]+px$/.test(token));
+        if (Number.parseFloat(lengths[2] ?? '0') > limit) continue;
+        const color = tokens.map((token) => this.paint(token)).find((read) => read !== null);
+        inks.push(color ?? null);
       }
     }
-    if (inks.includes(null)) return null;
-    let best = 0;
-    let painted = false;
-    for (const ink of inks as RGBA[]) {
-      const alpha = ink.a * opacity;
-      if (alpha <= 0) continue;
-      painted = true;
-      best = Math.max(best, contrast(over({ ...ink, a: alpha }, background), background));
+    const clip = this.textClipOf(element);
+    if (clip !== undefined) inks.push(clip);
+    return inks;
+  }
+
+  /**
+   * Ink that is fully transparent is invisible over any backdrop, known or
+   * not; ink that paints has to wait for the backdrop under the text it draws.
+   */
+  private inkOf(
+    element: Element,
+    style: CSSStyleDeclaration,
+    frame: Frame,
+    parent: Frame,
+    selector: string | undefined,
+  ): Pick<Frame, 'color' | 'ink'> {
+    const inks = this.inksOf(element, style, frame.scale);
+    if (inks.includes(null)) return { color: null, ink: null };
+    const fill = inks[0] ?? TRANSPARENT;
+    const painted = (inks as RGBA[])
+      .map((ink) => ({ ...ink, a: ink.a * frame.opacity }))
+      .filter((ink) => ink.a > 0);
+    if (painted.length === 0) {
+      const detail = `text color ${toHex(fill)} is fully transparent`;
+      const color =
+        parent.color?.reason === 'transparent-text' && parent.color.detail === detail
+          ? parent.color
+          : selector === undefined
+            ? this.verdict('transparent-text', element, detail)
+            : { reason: 'transparent-text' as const, selector, detail };
+      return { color, ink: null };
     }
-    if (painted && best >= this.limits.minContrast) return null;
-    const fill = inks[0] ?? { r: 0, g: 0, b: 0, a: 0 };
-    const reason: HiddenReason = painted ? 'low-contrast' : 'transparent-text';
-    const detail = painted
-      ? `${toHex(fill)} on ${toHex(background)}, contrast ${best.toFixed(2)}:1`
-      : `text color ${toHex(fill)} is fully transparent`;
-    if (parent.color?.reason === reason && parent.color.detail === detail) return parent.color;
-    return selector === undefined
-      ? this.verdict(reason, element, detail)
-      : { reason, selector, detail };
+    const key = `${toHex(fill)}|${painted.map(toHex).join(',')}`;
+    const ink =
+      parent.ink !== null && parent.ink.key === key
+        ? parent.ink
+        : { painted, fill, element, selector, key };
+    return { color: null, ink };
   }
 
   /**
@@ -728,12 +990,8 @@ class Extractor {
     };
   }
 
-  /**
-   * Where a text node is actually drawn. Text whose every rectangle falls
-   * outside what a reader can reach is hidden: cut off by an ancestor when it
-   * is still inside the page, moved out of the page otherwise.
-   */
-  private placementOf(node: Text, frame: Frame): Verdict | null {
+  /** The rectangles a text node actually covers, the empty ones left out. */
+  private rectsOf(node: Text): DOMRect[] {
     const doc = node.ownerDocument;
     let range = this.ranges.get(doc);
     if (range === undefined) {
@@ -741,7 +999,17 @@ class Extractor {
       this.ranges.set(doc, range);
     }
     range.selectNodeContents(node);
-    const rects = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+    return [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+  }
+
+  /**
+   * Where a text node is actually drawn. Text whose every rectangle falls
+   * outside what a reader can reach is hidden: cut off by an ancestor when it
+   * is still inside the page, moved out of the page otherwise.
+   */
+  private placementOf(node: Text, frame: Frame): Verdict | null {
+    const doc = node.ownerDocument;
+    const rects = this.rectsOf(node);
     if (rects.length === 0) return null;
     const area = this.areaOf(doc);
     const meets = (rect: DOMRect, box: Rect): boolean =>
@@ -881,7 +1149,9 @@ class Extractor {
         ? (parent.font ?? at('font-size', `font-size: ${px(size)}`))
         : null;
 
-    frame.color = this.colorVerdict(element, style, frame.opacity, parent, selector);
+    const { color, ink } = this.inkOf(element, style, frame, parent, selector);
+    frame.color = color;
+    frame.ink = ink;
 
     // The root element's own overflow is what bounds the document's scrollable
     // area, which `areaOf` already measures, so it adds no clip of its own.
@@ -933,8 +1203,36 @@ class Extractor {
     const graphics = scope.svgText ? null : scope.svgGraphics;
     if (frame.subtree !== null) return frame.subtree;
     if (graphics !== null) return graphics;
-    const placement = node.data.trim() === '' ? null : this.placementOf(node, frame);
-    return placement ?? frame.visibility ?? frame.font ?? frame.color;
+    const blank = node.data.trim() === '';
+    const placement = blank ? null : this.placementOf(node, frame);
+    return (
+      placement ??
+      frame.visibility ??
+      frame.font ??
+      frame.color ??
+      (blank ? null : this.contrastVerdict(frame.ink, this.pointIn(node)))
+    );
+  }
+
+  /** The centre of a text node's first rectangle, where its backdrop is read. */
+  private pointIn(node: Text): [number, number] | null {
+    const [rect] = this.rectsOf(node);
+    return rect === undefined ? null : [rect.left + rect.width / 2, rect.top + rect.height / 2];
+  }
+
+  /** Text drawn too close to the color behind it to be read. */
+  private contrastVerdict(ink: Ink | null, point: [number, number] | null): Verdict | null {
+    if (ink === null) return null;
+    const backdrop = this.backdropAt(point, ink.element);
+    if (backdrop === null) return null;
+    let best = 0;
+    for (const paint of ink.painted)
+      best = Math.max(best, contrast(over(paint, backdrop), backdrop));
+    if (best >= this.limits.minContrast) return null;
+    const detail = `${toHex(ink.fill)} on ${toHex(backdrop)}, contrast ${best.toFixed(2)}:1`;
+    return ink.selector === undefined
+      ? this.verdict('low-contrast', ink.element, detail)
+      : { reason: 'low-contrast', selector: ink.selector, detail };
   }
 
   build(
@@ -1022,17 +1320,67 @@ class Extractor {
         );
     }
 
-    const hideChildren = (reason: HiddenReason, detail: string): Frame =>
-      frame.subtree === null ? { ...frame, subtree: this.verdict(reason, element, detail) } : frame;
+    // The first formatted line and the first letter take their own styles,
+    // which can hide text the block's own styles show.
+    const container = frame.subtree === null && isBlockContainer(display, scope.flexItem);
+    const line = container ? this.startVerdict(element, frame, scope, 'first-line') : null;
+    const inherited = line === null ? frame : { ...frame, subtree: line };
 
-    const children = this.childrenOf(element, style, frame, inner, hideChildren);
+    const hideChildren = (reason: HiddenReason, detail: string): Frame =>
+      inherited.subtree === null
+        ? { ...inherited, subtree: this.verdict(reason, element, detail) }
+        : inherited;
+
+    const children = this.childrenOf(element, style, inherited, inner, hideChildren);
     if (!boxless && namespace === HTML_NAMESPACE && own(NO_PSEUDO, element.localName) !== true) {
-      const before = this.pseudo(element, 'before', frame, inner);
-      const after = this.pseudo(element, 'after', frame, inner);
+      const before = this.pseudo(element, 'before', inherited, inner);
+      const after = this.pseudo(element, 'after', inherited, inner);
       if (before !== null) children.unshift(before);
       if (after !== null) children.push(after);
     }
+    const letter = container ? this.startVerdict(element, inherited, scope, 'first-letter') : null;
+    if (letter !== null) hideFirstLetter(children, letter);
     return { kind: 'box', layout, children };
+  }
+
+  /**
+   * The verdict `::first-line` or `::first-letter` styles give a block's text,
+   * when they hide text the block's own styles show. As in static mode the
+   * whole block is judged by them, since a short block is one line.
+   */
+  private startVerdict(
+    element: Element,
+    frame: Frame,
+    scope: Scope,
+    which: 'first-line' | 'first-letter',
+  ): Verdict | null {
+    if (element.namespaceURI !== HTML_NAMESPACE) return null;
+    if (this.inkVerdict(element, frame, scope) !== null) return null;
+    const style = this.styleOf(element, which);
+    if (style === null) return null;
+    const display = parseDisplay(style.getPropertyValue('display'));
+    const selector = `${this.selectorOf(element)}::${which}`;
+    const pseudo = this.enter(element, style, display, frame, scope, selector);
+    return this.inkVerdict(element, pseudo, scope);
+  }
+
+  /**
+   * The verdict a frame gives text, read at the element's own box: everything
+   * but where the text lands, which belongs to the text node.
+   */
+  private inkVerdict(element: Element, frame: Frame, scope: Scope): Verdict | null {
+    const graphics = scope.svgText ? null : scope.svgGraphics;
+    const box = element.getBoundingClientRect();
+    const point: [number, number] | null =
+      box.width > 0 && box.height > 0 ? [box.left + box.width / 2, box.top + box.height / 2] : null;
+    return (
+      frame.subtree ??
+      graphics ??
+      frame.visibility ??
+      frame.font ??
+      frame.color ??
+      this.contrastVerdict(frame.ink, point)
+    );
   }
 
   /** The flat-tree children of an element, with the parts a browser does not render. */
@@ -1191,12 +1539,9 @@ class Extractor {
       pseudoFrame.subtree !== null && BOXLESS[pseudoFrame.subtree.reason] === true
         ? 'inline'
         : this.layoutOfDisplay(display, style.getPropertyValue('position'), scope);
-    const hidden =
-      pseudoFrame.subtree ??
-      (scope.svgText ? null : scope.svgGraphics) ??
-      pseudoFrame.visibility ??
-      pseudoFrame.font ??
-      pseudoFrame.color;
+    // A pseudo-element has no box to select, so its backdrop is read at the
+    // middle of the element it belongs to.
+    const hidden = this.inkVerdict(element, pseudoFrame, scope);
     return {
       kind: 'box',
       layout,

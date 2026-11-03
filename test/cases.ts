@@ -623,7 +623,7 @@ export const cases: Case[] = [
   },
   {
     name: 'large positioned boxes and table columns may paint behind text',
-    html: '<div style="position: fixed; inset: 0; background: #111"></div><main style="color: #eee"><p>dark theme</p></main><section style="position: relative"><div style="position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6)"></div><h1 style="position: relative; color: #fff">hero</h1></section><table><colgroup><col style="background: #000"></colgroup><tr><td style="color: #fff">cell</td></tr></table>',
+    html: '<div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><main style="color: #eee"><p>dark theme</p></main><section style="position: relative"><div style="position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6)"></div><h1 style="position: relative; color: #fff">hero</h1></section><table><colgroup><col style="background: #000"></colgroup><tr><td style="color: #fff">cell</td></tr></table>',
     visible: 'dark theme\n\nhero\ncell',
   },
   {
@@ -637,7 +637,7 @@ export const cases: Case[] = [
   },
   {
     name: 'the body background paints the canvas, below fixed backdrops',
-    html: '<!doctype html><body style="background: #fff"><div style="position: fixed; inset: 0; background: #111"></div><p style="color: #eee">over a fixed backdrop</p></body>',
+    html: '<!doctype html><body style="background: #fff"><div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><p style="color: #eee">over a fixed backdrop</p></body>',
     visible: 'over a fixed backdrop',
   },
   {

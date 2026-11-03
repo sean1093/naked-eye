@@ -5,7 +5,16 @@
  */
 import type { AnyNode, Document, Element, ParentNode } from 'domhandler';
 import { createStyleEngine, type Style, type StyleEngine, type World } from './css/cascade.js';
-import { contrast, DARK_CANVAS, LIGHT_CANVAS, over, type RGBA, toHex } from './css/color.js';
+import {
+  contrast,
+  DARK_CANVAS,
+  LIGHT_CANVAS,
+  MAX_SHADOW_BLUR,
+  MIN_STROKE,
+  over,
+  type RGBA,
+  toHex,
+} from './css/color.js';
 import { DepthExceededError, parseHtml } from './dom.js';
 import {
   BOXLESS,
@@ -18,7 +27,14 @@ import {
   SVG_NAMESPACE,
   SVG_TEXT,
 } from './elements.js';
-import { assemble, type Layout, type RenderNode, type Space, type Verdict } from './render.js';
+import {
+  assemble,
+  hideFirstLetter,
+  type Layout,
+  type RenderNode,
+  type Space,
+  type Verdict,
+} from './render.js';
 import { attachShadowRoots, type ShadowTrees } from './shadow.js';
 import type { ExtractOptions, ExtractResult, HiddenReason, Warning } from './types.js';
 import { MAY_CONTAIN_INVISIBLE } from './unicode.js';
@@ -87,10 +103,6 @@ const ROOT_FRAME: Frame = {
 };
 
 const TRANSPARENT: RGBA = { r: 0, g: 0, b: 0, a: 0 };
-/** A text stroke thinner than this many CSS pixels draws nothing legible. */
-const MIN_STROKE = 0.5;
-/** A text shadow blurred by more than this fraction of the font size draws nothing legible. */
-const MAX_SHADOW_BLUR = 0.25;
 
 /** Boxes `::first-line` and `::first-letter` apply to: block containers. */
 function isBlockContainer(style: Style, blockified: boolean): boolean {
@@ -102,35 +114,6 @@ function isBlockContainer(style: Style, blockified: boolean): boolean {
   return display.inner === 'flow' && (blockified || display.outer !== 'inline');
 }
 
-/** Leading punctuation, the first letter, digit or symbol with its marks, and trailing punctuation. */
-const FIRST_LETTER = /^\s*(?:\p{P}\p{Zs}*)*[\p{L}\p{N}\p{S}]\p{M}*\p{P}*/u;
-
-/**
- * Hides the first letter of a block's first formatted line: the first text
- * the render tree draws, unless a line break or other text comes first.
- * Returns whether the search is over.
- */
-function hideFirstLetter(nodes: RenderNode[], verdict: Verdict): boolean {
-  for (const [index, node] of nodes.entries()) {
-    if (node.kind === 'break') return true;
-    if (node.kind === 'box') {
-      if (hideFirstLetter(node.children, verdict)) return true;
-      continue;
-    }
-    if (node.hidden !== null || node.text.trim() === '') continue;
-    const match = FIRST_LETTER.exec(node.text);
-    if (match === null) return true;
-    const [letter] = match;
-    nodes.splice(
-      index,
-      1,
-      { ...node, text: letter, hidden: verdict },
-      { ...node, text: node.text.slice(letter.length) },
-    );
-    return true;
-  }
-  return false;
-}
 const isElement = (node: AnyNode): node is Element =>
   node.type === 'tag' || node.type === 'script' || node.type === 'style';
 

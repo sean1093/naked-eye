@@ -288,8 +288,10 @@ document, with a warning.
   Only what no scrolling reaches — outside the document's scrollable area, or
   cut off by `overflow: hidden`, `overflow: clip` or paint containment — is
   reported as `off-screen` or `clipped`.
-- **Generated content has no box to measure.** `::before` and `::after` are
-  judged from their computed styles alone, not from where they land.
+- **Generated content has no box to select.** `::before`, `::after`,
+  `::first-line` and `::first-letter` are judged from their computed styles,
+  with the backdrop read at the middle of the element they belong to rather
+  than under the text itself.
 - **Thresholds only.** `extractVisibleFromPage` takes `minFontSize`,
   `minOpacity` and `minContrast`. The viewport, the color scheme and the style
   sheets are the open page's own, and off-screen text is decided by real

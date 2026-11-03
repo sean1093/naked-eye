@@ -729,6 +729,11 @@ export function parseLegacyColor(input: string): RGBA | null {
 export const LIGHT_CANVAS: RGBA = { r: 1, g: 1, b: 1, a: 1 };
 export const DARK_CANVAS: RGBA = { r: 0x12 / 255, g: 0x12 / 255, b: 0x12 / 255, a: 1 };
 
+/** A text stroke thinner than this many CSS pixels draws nothing legible. */
+export const MIN_STROKE = 0.5;
+/** A text shadow blurred by more than this fraction of the font size draws nothing legible. */
+export const MAX_SHADOW_BLUR = 0.25;
+
 /** Composites `top` over an opaque `bottom`. */
 export function over(top: RGBA, bottom: RGBA): RGBA {
   const blend = (a: number, b: number): number => a * top.a + b * (1 - top.a);

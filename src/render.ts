@@ -110,6 +110,37 @@ export function squash(text: string): string {
   return text.replace(COLLAPSIBLE, ' ').trim();
 }
 
+/** Leading punctuation, the first letter, digit or symbol with its marks, and trailing punctuation. */
+const FIRST_LETTER = /^\s*(?:\p{P}\p{Zs}*)*[\p{L}\p{N}\p{S}]\p{M}*\p{P}*/u;
+
+/**
+ * Hides the first letter of a block's first formatted line: the first text
+ * the render tree draws, unless a line break or other text comes first.
+ * Returns whether the search is over. Both modes find `::first-letter` in the
+ * tree the same way, since by then the tree is the same shape.
+ */
+export function hideFirstLetter(nodes: RenderNode[], verdict: Verdict): boolean {
+  for (const [index, node] of nodes.entries()) {
+    if (node.kind === 'break') return true;
+    if (node.kind === 'box') {
+      if (hideFirstLetter(node.children, verdict)) return true;
+      continue;
+    }
+    if (node.hidden !== null || node.text.trim() === '') continue;
+    const match = FIRST_LETTER.exec(node.text);
+    if (match === null) return true;
+    const [letter] = match;
+    nodes.splice(
+      index,
+      1,
+      { ...node, text: letter, hidden: verdict },
+      { ...node, text: node.text.slice(letter.length) },
+    );
+    return true;
+  }
+  return false;
+}
+
 /** What each kind of removal is called, for one and for several. */
 const INVISIBLE_DETAIL: Record<Removal['kind'], [string, string]> = {
   tag: ['Unicode tag character', 'Unicode tag characters'],
