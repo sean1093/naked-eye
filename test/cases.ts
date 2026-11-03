@@ -21,6 +21,25 @@ const selectors = (text: string): string =>
     String.fromCodePoint(byte < 16 ? 0xfe00 + byte : 0xe0100 + byte - 16),
   ).join('');
 
+/** Where an expectation differs: one extraction mode, or one browser engine. */
+export type Where = 'browser' | 'chromium' | 'firefox' | 'webkit';
+
+/**
+ * An expectation that one mode or one engine genuinely does not meet, with
+ * what it produces instead and why the difference is real. A case is never
+ * skipped: the alternative is asserted exactly as strictly as the main one,
+ * and the most specific entry wins (the engine's over `browser`).
+ */
+export interface Divergence {
+  where: Where;
+  /** The `text` that mode or engine produces instead of `visible`. */
+  visible: string;
+  /** Findings that must be present; it replaces the case's `hidden` entirely. */
+  hidden?: [HiddenReason, string][];
+  /** Why the difference is real, in one line. */
+  reason: string;
+}
+
 export interface Case {
   name: string;
   /** Body content, or a whole document when it starts with `<!doctype`. */
@@ -29,6 +48,7 @@ export interface Case {
   visible: string;
   /** Findings that must be present: `[reason, text]`. */
   hidden?: [HiddenReason, string][];
+  diverges?: Divergence[];
 }
 
 export const cases: Case[] = [
@@ -146,6 +166,19 @@ export const cases: Case[] = [
     hidden: [
       ['not-rendered', 'tip'],
       ['not-rendered', 'loose'],
+    ],
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'painted',
+        hidden: [
+          ['not-rendered', 'tip'],
+          ['not-rendered', 'loose'],
+          ['clipped', 'html'],
+        ],
+        reason:
+          'A <foreignObject> without width or height is zero-sized and clips its content, so no engine paints the HTML inside it; static mode has no layout to see that.',
+      },
     ],
   },
   {
@@ -268,6 +301,15 @@ export const cases: Case[] = [
     name: 'transforms that keep text readable',
     html: '<p style="transform: rotate(180deg) skewX(10deg)">turned</p><p style="transform: scale(-1)">mirrored</p><p style="transform: translate(10px, 10px) scaleX(1.5)">moved</p>',
     visible: 'turned\n\nmirrored\n\nmoved',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'turned\n\nmirrored',
+        hidden: [['off-screen', 'moved']],
+        reason:
+          'scaleX(1.5) about the centre of a full-width block starts the line at about -298px, which no engine paints and nothing can scroll to; static mode cannot know the block is full width.',
+      },
+    ],
   },
   {
     name: 'transforms do not apply to inline boxes',
@@ -384,6 +426,20 @@ export const cases: Case[] = [
       ['font-size', 'b'],
       ['font-size', 'c'],
     ],
+    diverges: [
+      {
+        where: 'browser',
+        visible: '',
+        hidden: [
+          ['font-size', 'a'],
+          ['font-size', 'b'],
+          ['font-size', 'c'],
+          ['off-screen', 'kept'],
+        ],
+        reason:
+          'Rotating a full-width block by 45 degrees about its centre carries the start of the line above the top edge, where nothing is painted and no scrolling reaches; static mode cannot know the block is full width.',
+      },
+    ],
   },
   {
     name: 'a large positive indent on a page that clips horizontally',
@@ -410,6 +466,47 @@ export const cases: Case[] = [
     name: 'preserve-spaces collapses line breaks into spaces',
     html: '<div style="white-space-collapse: preserve-spaces">a  b\nc</div>',
     visible: 'a  b c',
+    diverges: [
+      {
+        where: 'chromium',
+        visible: 'a b c',
+        reason:
+          'Chromium does not implement the preserve-spaces value, so the declaration is invalid and white space collapses.',
+      },
+      {
+        where: 'webkit',
+        visible: 'a b c',
+        reason:
+          'WebKit does not implement the preserve-spaces value, so the declaration is invalid and white space collapses.',
+      },
+    ],
+  },
+  {
+    name: 'text pushed out of a box that cuts its overflow off',
+    html: '<div style="height: 20px; line-height: 40px; overflow: hidden"><p style="margin: 0">first line</p><p style="margin: 0">out of sight</p></div>',
+    visible: 'first line\n\nout of sight',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'first line',
+        hidden: [['clipped', 'out of sight']],
+        reason:
+          'Only layout says where the second line lands, so static mode cannot see that the box cuts it off; this is what browser mode adds.',
+      },
+    ],
+  },
+  {
+    name: 'a same-origin frame',
+    html: '<p>outside</p><iframe srcdoc="<p>inside the frame</p>" width="300" height="100"></iframe>',
+    visible: 'outside',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'outside\n\ninside the frame',
+        reason:
+          'Browser mode reads the document of a same-origin frame; for static mode srcdoc is an attribute, and attributes are not extracted.',
+      },
+    ],
   },
   // Color and contrast.
   {
@@ -495,6 +592,12 @@ export const cases: Case[] = [
     html: '<!doctype html><html style="color-scheme: dark"><body><p>default text</p><p style="color: #121212">dark on dark</p></body></html>',
     visible: 'default text',
     hidden: [['low-contrast', 'dark on dark']],
+  },
+  {
+    name: 'a page that supports both schemes is read in the preferred one',
+    html: '<!doctype html><html style="color-scheme: light dark"><body><p style="color: #121212">dark on light</p><p style="color: white">white on white</p></body></html>',
+    visible: 'dark on light',
+    hidden: [['low-contrast', 'white on white']],
   },
   {
     name: 'legacy color attributes',
@@ -719,6 +822,14 @@ export const cases: Case[] = [
     html: '<div><template shadowrootmode="closed"><slot name="a">fallback a</slot> <slot name="b">fallback b</slot></template><span slot="a">assigned a</span></div>',
     visible: 'assigned a fallback b',
     hidden: [['not-rendered', 'fallback a']],
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'assigned a',
+        reason:
+          'A closed shadow root cannot be read from the page, so browser mode sees neither the slots nor their fallback content, only the light child that fills one.',
+      },
+    ],
   },
   {
     name: 'light children no slot accepts',
