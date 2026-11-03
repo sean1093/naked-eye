@@ -22,7 +22,7 @@ import {
   resolveLength,
   resolveNumber,
 } from './calc.js';
-import { type Color, type RGBA, resolveColor, type Scheme } from './color.js';
+import { type Color, type RGBA, resolveColor, type Scheme, toHex } from './color.js';
 import {
   type Environment,
   evaluateMediaQueryList,
@@ -133,15 +133,18 @@ export interface Style {
   color: RGBA | null;
   backgroundColor: RGBA | null;
   backgroundImage: boolean;
+  /** The background paints inside the glyphs instead of behind them (`background-clip: text`). */
+  backgroundClipText: boolean;
   /** The glyph fill: `-webkit-text-fill-color`, which defaults to `color`. */
   textFill: RGBA | null;
   strokeWidth: number;
   strokeColor: RGBA | null;
-  shadows: (RGBA | null)[];
+  /** Distinct shadow layers, at most 64: each color and blur radius in px. */
+  shadows: { color: RGBA | null; blur: number }[];
   /** Specified values that inherit unresolved, so `currentcolor` follows each element's color. */
   fillSpec: Color;
   strokeSpec: Color;
-  shadowSpecs: Color[];
+  shadowSpecs: Values['text-shadow'];
   /** SVG text paints with `fill` and `stroke`; `null` is a color this engine cannot evaluate. */
   svgFill: RGBA | 'none' | null;
   svgStroke: RGBA | 'none' | null;
@@ -355,6 +358,7 @@ const INITIAL_STYLE: Style = {
   color: { r: 0, g: 0, b: 0, a: 1 },
   backgroundColor: { r: 0, g: 0, b: 0, a: 0 },
   backgroundImage: false,
+  backgroundClipText: false,
   textFill: { r: 0, g: 0, b: 0, a: 1 },
   strokeWidth: 0,
   strokeColor: { r: 0, g: 0, b: 0, a: 1 },
@@ -1399,6 +1403,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
           ? INITIAL_STYLE.backgroundColor
           : resolve(background, style.color);
     style.backgroundImage = plain('background-image', parentStyle.backgroundImage, false);
+    style.backgroundClipText = plain('background-clip', parentStyle.backgroundClipText, false);
     style.fillSpec = plain('-webkit-text-fill-color', parentStyle.fillSpec, {
       kind: 'currentcolor',
     });
@@ -1414,7 +1419,27 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       style.strokeWidth = typeof width === 'number' ? Math.max(0, width) : 0;
     }
     style.shadowSpecs = plain('text-shadow', parentStyle.shadowSpecs, []);
-    style.shadows = style.shadowSpecs.map((shadow) => resolve(shadow, style.color));
+    if (
+      style.shadowSpecs === parentStyle.shadowSpecs &&
+      style.color === parentStyle.color &&
+      style.fontSize === parentStyle.fontSize
+    ) {
+      // An inherited list resolves as the parent's did: sharing it keeps long lists linear.
+      style.shadows = parentStyle.shadows;
+    } else {
+      const seen = new Set<string>();
+      style.shadows = [];
+      for (const shadow of style.shadowSpecs) {
+        const color = resolve(shadow.color, style.color);
+        const radius = resolveLength(shadow.blur, ctx);
+        const blur = typeof radius === 'number' ? Math.max(0, radius) : 0;
+        const key = color === null ? `? ${blur}` : `${toHex(color)} ${blur}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        style.shadows.push({ color, blur });
+        if (style.shadows.length === 64) break;
+      }
+    }
 
     const paint = (spec: Paint): RGBA | 'none' | null =>
       spec === 'none' ? 'none' : spec === 'other' ? null : resolve(spec, style.color);

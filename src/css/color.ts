@@ -7,7 +7,7 @@
 import { type ComponentValue, isFunctionNode } from '@csstools/css-parser-algorithms';
 import { TokenType } from '@csstools/css-tokenizer';
 import { own } from '../util.js';
-import { type Context, evaluate, parseNumeric } from './calc.js';
+import { type Context, evaluate, hasPercentage, parseNumeric } from './calc.js';
 import { identOf, isToken, significant, splitCommas, stringOf, tokenOf } from './syntax.js';
 
 /** Gamma-encoded sRGB channels in 0..1, and alpha in 0..1. */
@@ -29,7 +29,22 @@ export type Color =
   | { kind: 'rgba'; value: RGBA }
   | { kind: 'currentcolor' }
   | { kind: 'scheme'; light: Color; dark: Color }
+  | Mix
   | { kind: 'unknown'; text: string };
+
+/** A `color-mix()` whose operands are only known per element: `currentcolor`, system colors, `light-dark()`. */
+interface Mix {
+  kind: 'mix';
+  space: string;
+  hue: string;
+  first: Color;
+  second: Color;
+  weights: [number, number];
+  /** The alpha multiplier when the percentages add up to less than 100%. */
+  scale: number;
+}
+
+type Coords = [number, number, number];
 
 const NAMED = Object.fromEntries(
   (
@@ -192,6 +207,58 @@ function fromOklab(l: number, a: number, b: number, alpha: number): Color {
   return fromLinear(apply(LMS_TO_LINEAR_SRGB, lms), alpha);
 }
 
+const LINEAR_SRGB_TO_XYZ: Matrix = [
+  [0.41239079926595934, 0.357584339383878, 0.1804807884018343],
+  [0.21263900587151027, 0.715168678767756, 0.07219231536073371],
+  [0.01933081871559182, 0.11919477979462598, 0.9505321522496607],
+];
+const D65_TO_D50: Matrix = [
+  [1.0479297925449969, 0.022946870601609652, -0.05019226628920524],
+  [0.02962780877005599, 0.9904344267538799, -0.017073799063418826],
+  [-0.009243040646204504, 0.015055191490298152, 0.7518742814281371],
+];
+
+const linearOf = ({ r, g, b }: RGBA): Coords => [decodeSrgb(r), decodeSrgb(g), decodeSrgb(b)];
+
+function toLab(color: RGBA): Coords {
+  const [x, y, z] = apply(D65_TO_D50, apply(LINEAR_SRGB_TO_XYZ, linearOf(color)));
+  const epsilon = 216 / 24389;
+  const kappa = 24389 / 27;
+  const f = (t: number): number => (t > epsilon ? Math.cbrt(t) : (kappa * t + 16) / 116);
+  const fx = f(x / (0.3457 / 0.3585));
+  const fy = f(y);
+  const fz = f(z / ((1 - 0.3457 - 0.3585) / 0.3585));
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+function toOklab(color: RGBA): Coords {
+  const lms = apply(LINEAR_SRGB_TO_LMS, linearOf(color)).map(Math.cbrt) as Coords;
+  return apply(LMS_TO_OKLAB, lms);
+}
+
+/** HSL with an undefined (NaN) hue for grays, where the hue is powerless. */
+function toHsl({ r, g, b }: RGBA): Coords {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  const range = max - min;
+  if (range === 0) return [Number.NaN, 0, lightness];
+  const saturation =
+    lightness === 0 || lightness === 1 ? 0 : (max - lightness) / Math.min(lightness, 1 - lightness);
+  let hue: number;
+  if (max === r) hue = (g - b) / range + (g < b ? 6 : 0);
+  else if (max === g) hue = (b - r) / range + 2;
+  else hue = (r - g) / range + 4;
+  return [hue * 60, saturation, lightness];
+}
+
+/** Lightness, chroma and hue from a rectangular space; the hue is powerless at zero chroma. */
+function polar([lightness, a, b]: Coords, achromatic: number): Coords {
+  const chroma = Math.hypot(a, b);
+  const hue = chroma <= achromatic ? Number.NaN : ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
+  return [lightness, chroma, hue];
+}
+
 function fromHsl(hue: number, saturation: number, lightness: number, alpha: number): Color {
   const h = (((hue % 360) + 360) % 360) / 30;
   const chroma = saturation * Math.min(lightness, 1 - lightness);
@@ -229,24 +296,37 @@ function channel(node: ComponentValue | undefined): [number, boolean] | null {
   if (token?.[0] === TokenType.Percentage) return [token[4].value / 100, true];
   const expr = parseNumeric(node);
   if (expr === null) return null;
+  if (hasPercentage(expr)) {
+    // calc(50%) is still a percentage; a percentage mixed with a length is no channel at all.
+    const mixed = evaluate(expr, { ...CHECK, percent: 'length' });
+    if (mixed === null || mixed.unknown || mixed.kind !== 'length' || mixed.value !== 0)
+      return null;
+    return [mixed.pct / 100, true];
+  }
   const value = evaluate(expr, CHECK);
   if (value === null || value.unknown) return null;
   if (value.kind === 'angle') return [value.value, false];
   return value.kind === 'number' ? [value.value, false] : null;
 }
 
-/** Channels of a color function: three components and an optional alpha. */
+/**
+ * Channels of a color function: three components and an optional alpha.
+ * `legacy` names the function whose comma-separated form is allowed.
+ */
 function components(
   args: ComponentValue[],
-  legacyCommas: boolean,
+  legacy: 'rgb' | 'hsl' | null,
 ): { values: [number, boolean][]; alpha: number } | null {
   const commas = splitCommas(args).map(significant);
   let nodes: ComponentValue[];
   let alphaNode: ComponentValue | undefined;
-  if (legacyCommas && commas.length >= 3) {
+  let commaSyntax = false;
+  if (legacy !== null && commas.length >= 3) {
     if (commas.length > 4 || commas.some((part) => part.length !== 1)) return null;
     nodes = commas.slice(0, 3).map((part) => part[0] as ComponentValue);
     alphaNode = commas[3]?.[0];
+    if ([...nodes, alphaNode].some((node) => identOf(node) === 'none')) return null;
+    commaSyntax = true;
   } else {
     if (commas.length !== 1) return null;
     const all = commas[0] as ComponentValue[];
@@ -260,6 +340,15 @@ function components(
   if (nodes.length !== 3) return null;
   const values = nodes.map(channel);
   if (values.includes(null)) return null;
+  if (commaSyntax) {
+    // The comma syntax takes all numbers or all percentages in rgb(), percentages for hsl()'s S and L.
+    const percents = (values as [number, boolean][]).map(([, percent]) => percent);
+    const consistent =
+      legacy === 'rgb'
+        ? percents.every((percent) => percent === percents[0])
+        : percents[1] === true && percents[2] === true;
+    if (consistent === false) return null;
+  }
   let alpha = 1;
   if (alphaNode !== undefined) {
     const parsed = channel(alphaNode);
@@ -303,7 +392,7 @@ function parseFunction(name: string, args: ComponentValue[]): Color | null {
 
   const parsed = components(
     args,
-    name === 'rgb' || name === 'rgba' || name === 'hsl' || name === 'hsla',
+    name === 'rgb' || name === 'rgba' ? 'rgb' : name === 'hsl' || name === 'hsla' ? 'hsl' : null,
   );
   if (parsed === null) return null;
   const [[x, xPct], [y, yPct], [z, zPct]] = parsed.values as [
@@ -312,6 +401,10 @@ function parseFunction(name: string, args: ComponentValue[]): Color | null {
     [number, boolean],
   ];
   const { alpha } = parsed;
+  // Out-of-range saturation, lightness, whiteness, blackness and chroma clamp at parse time.
+  const unit = (value: number): number => Math.min(1, Math.max(0, value));
+  const lightness = (value: number, percent: boolean, scale: number): number =>
+    Math.min(scale, Math.max(0, percent ? value * scale : value));
   switch (name) {
     case 'rgb':
     case 'rgba': {
@@ -320,22 +413,32 @@ function parseFunction(name: string, args: ComponentValue[]): Color | null {
     }
     case 'hsl':
     case 'hsla':
-      return fromHsl(x, yPct ? y : y / 100, zPct ? z : z / 100, alpha);
+      return fromHsl(x, unit(yPct ? y : y / 100), unit(zPct ? z : z / 100), alpha);
     case 'hwb':
-      return fromHwb(x, yPct ? y : y / 100, zPct ? z : z / 100, alpha);
+      return fromHwb(x, unit(yPct ? y : y / 100), unit(zPct ? z : z / 100), alpha);
     case 'lab':
-      return fromLab(xPct ? x * 100 : x, yPct ? y * 125 : y, zPct ? z * 125 : z, alpha);
+      return fromLab(lightness(x, xPct, 100), yPct ? y * 125 : y, zPct ? z * 125 : z, alpha);
     case 'lch': {
-      const chroma = yPct ? y * 150 : y;
+      const chroma = Math.max(0, yPct ? y * 150 : y);
       const hue = (z * Math.PI) / 180;
-      return fromLab(xPct ? x * 100 : x, chroma * Math.cos(hue), chroma * Math.sin(hue), alpha);
+      return fromLab(
+        lightness(x, xPct, 100),
+        chroma * Math.cos(hue),
+        chroma * Math.sin(hue),
+        alpha,
+      );
     }
     case 'oklab':
-      return fromOklab(x, yPct ? y * 0.4 : y, zPct ? z * 0.4 : z, alpha);
+      return fromOklab(lightness(x, xPct, 1), yPct ? y * 0.4 : y, zPct ? z * 0.4 : z, alpha);
     default: {
-      const chroma = yPct ? y * 0.4 : y;
+      const chroma = Math.max(0, yPct ? y * 0.4 : y);
       const hue = (z * Math.PI) / 180;
-      return fromOklab(x, chroma * Math.cos(hue), chroma * Math.sin(hue), alpha);
+      return fromOklab(
+        lightness(x, xPct, 1),
+        chroma * Math.cos(hue),
+        chroma * Math.sin(hue),
+        alpha,
+      );
     }
   }
 }
@@ -344,7 +447,7 @@ function parseColorFunction(args: ComponentValue[]): Color | null {
   const nodes = significant(args);
   const space = identOf(nodes[0]);
   if (space === undefined) return null;
-  const parsed = components(nodes.slice(1), false);
+  const parsed = components(nodes.slice(1), null);
   if (parsed === null) return null;
   const [r, g, b] = parsed.values.map(([value]) => value) as [number, number, number];
   const { alpha } = parsed;
@@ -405,40 +508,123 @@ const LMS_TO_OKLAB: Matrix = [
   [0.0259040371, 0.7827717662, -0.808675766],
 ];
 
-/** Coordinates to interpolate in: gamma-encoded sRGB, OKLab, or linear sRGB for every other space. */
-function mixSpace(space: string): {
-  to: (color: RGBA) => [number, number, number];
-  from: (xyz: [number, number, number], alpha: number) => Color;
-} {
-  if (space === 'srgb' || space === 'hsl' || space === 'hwb') {
-    return { to: ({ r, g, b }) => [r, g, b], from: ([r, g, b], alpha) => rgba(r, g, b, alpha) };
-  }
-  if (space === 'oklab' || space === 'oklch') {
-    return {
-      to: ({ r, g, b }) => {
-        const lms = apply(LINEAR_SRGB_TO_LMS, [decodeSrgb(r), decodeSrgb(g), decodeSrgb(b)]).map(
-          Math.cbrt,
-        ) as [number, number, number];
-        return apply(LMS_TO_OKLAB, lms);
-      },
-      from: ([l, a, b], alpha) => fromOklab(l, a, b, alpha),
-    };
-  }
-  return {
-    to: ({ r, g, b }) => [decodeSrgb(r), decodeSrgb(g), decodeSrgb(b)],
-    from: (linear, alpha) => fromLinear(linear, alpha),
-  };
+/** A space `color-mix()` interpolates in; polar spaces name the index of their hue. */
+interface MixSpace {
+  to: (color: RGBA) => Coords;
+  from: (coords: Coords, alpha: number) => Color;
+  hue?: number;
+}
+
+const LINEAR: MixSpace = { to: linearOf, from: fromLinear };
+
+/** Interpolation spaces. XYZ is a linear transform of linear sRGB, so mixing in either is the same. */
+const MIX_SPACES: Record<string, MixSpace> = {
+  srgb: { to: ({ r, g, b }) => [r, g, b], from: ([r, g, b], alpha) => rgba(r, g, b, alpha) },
+  'srgb-linear': LINEAR,
+  xyz: LINEAR,
+  'xyz-d50': LINEAR,
+  'xyz-d65': LINEAR,
+  lab: { to: toLab, from: ([l, a, b], alpha) => fromLab(l, a, b, alpha) },
+  oklab: { to: toOklab, from: ([l, a, b], alpha) => fromOklab(l, a, b, alpha) },
+  hsl: { to: toHsl, from: ([h, s, l], alpha) => fromHsl(h, s, l, alpha), hue: 0 },
+  hwb: {
+    to: (color) => {
+      const white = Math.min(color.r, color.g, color.b);
+      const black = 1 - Math.max(color.r, color.g, color.b);
+      return [white + black >= 1 ? Number.NaN : toHsl(color)[0], white, black];
+    },
+    from: ([h, w, b], alpha) => fromHwb(h, w, b, alpha),
+    hue: 0,
+  },
+  lch: {
+    to: (color) => polar(toLab(color), 0.0015),
+    from: ([l, c, h], alpha) => {
+      const angle = (h * Math.PI) / 180;
+      return fromLab(l, c * Math.cos(angle), c * Math.sin(angle), alpha);
+    },
+    hue: 2,
+  },
+  oklch: {
+    to: (color) => polar(toOklab(color), 0.000004),
+    from: ([l, c, h], alpha) => {
+      const angle = (h * Math.PI) / 180;
+      return fromOklab(l, c * Math.cos(angle), c * Math.sin(angle), alpha);
+    },
+    hue: 2,
+  },
+};
+
+/** Spaces a browser accepts but this engine does not mix in: the result is unknown. */
+const UNMIXED: Record<string, true> = {
+  'display-p3': true,
+  'a98-rgb': true,
+  'prophoto-rgb': true,
+  rec2020: true,
+};
+
+const HUE_METHODS: Record<string, true> = {
+  shorter: true,
+  longer: true,
+  increasing: true,
+  decreasing: true,
+};
+
+/** Hue angles adjusted so that interpolating between them follows the method. */
+function hues(first: number, second: number, method: string): [number, number] {
+  let [a, b] = [first, second];
+  const delta = b - a;
+  if (method === 'shorter') {
+    if (delta > 180) a += 360;
+    else if (delta < -180) b += 360;
+  } else if (method === 'longer') {
+    if (delta > 0 && delta < 180) a += 360;
+    else if (delta > -180 && delta <= 0) b += 360;
+  } else if (method === 'increasing') {
+    if (delta < 0) b += 360;
+  } else if (delta > 0) a += 360;
+  return [a, b];
 }
 
 /**
- * `color-mix()` with premultiplied alpha. Polar spaces are mixed in their
- * rectangular counterpart, which differs only for chromatic hue mixes.
+ * Interpolates two colors as CSS Color 4 does: premultiplied alpha, a
+ * powerless hue taking the other color's, and hues following the method.
  */
+function mix({ space, hue, weights, scale }: Mix, first: RGBA, second: RGBA): RGBA {
+  const [w1, w2] = weights;
+  const alpha = first.a * w1 + second.a * w2;
+  if (alpha === 0) return TRANSPARENT;
+  const { to, from, hue: hueIndex } = MIX_SPACES[space] as MixSpace;
+  const x = to(first);
+  const y = to(second);
+  const mixed = x.map((value, index) => {
+    let a = value;
+    let b = y[index] as number;
+    if (Number.isNaN(a)) a = Number.isNaN(b) ? 0 : b;
+    if (Number.isNaN(b)) b = a;
+    if (index === hueIndex) {
+      const [from1, from2] = hues(((a % 360) + 360) % 360, ((b % 360) + 360) % 360, hue);
+      return from1 * w1 + from2 * w2;
+    }
+    return (a * first.a * w1 + b * second.a * w2) / alpha;
+  }) as Coords;
+  return (from(mixed, alpha * scale) as { value: RGBA }).value;
+}
+
+/** `color-mix()`: evaluated now when both colors are concrete, per element otherwise. */
 function parseMix(args: ComponentValue[]): Color | null {
   const parts = splitCommas(args).map(significant);
   const header = parts[0] ?? [];
-  const space = identOf(header[1]);
-  if (parts.length !== 3 || identOf(header[0]) !== 'in' || space === undefined) return null;
+  if (parts.length !== 3 || identOf(header[0]) !== 'in') return null;
+  const space = identOf(header[1]) ?? '';
+  const method = header.length === 4 ? (identOf(header[2]) ?? '') : 'shorter';
+  const polarSpace = MIX_SPACES[space]?.hue !== undefined;
+  if (
+    header.length === 4 &&
+    (polarSpace === false || HUE_METHODS[method] !== true || identOf(header[3]) !== 'hue')
+  )
+    return null;
+  if (header.length !== 2 && header.length !== 4) return null;
+  if (MIX_SPACES[space] === undefined && UNMIXED[space] !== true) return null;
   const entries = parts.slice(1).map((part) => {
     const percent = part.find((node) => tokenOf(node)?.[0] === TokenType.Percentage);
     const amount = tokenOf(percent)?.[4] as { value?: unknown } | undefined;
@@ -447,24 +633,25 @@ function parseMix(args: ComponentValue[]): Color | null {
   });
   const [first, second] = entries as [(typeof entries)[0], (typeof entries)[0]];
   if (first.color === null || second.color === null) return null;
-  if (first.color.kind !== 'rgba' || second.color.kind !== 'rgba')
-    return { kind: 'unknown', text: 'color-mix()' };
+  if ([first.weight, second.weight].some((weight) => weight !== null && (weight < 0 || weight > 1)))
+    return null;
   const p1 = first.weight ?? (second.weight === null ? 0.5 : 1 - second.weight);
   const p2 = second.weight ?? 1 - p1;
   const total = p1 + p2;
   if (total <= 0) return null;
-  const [w1, w2] = [p1 / total, p2 / total];
-  const a = first.color.value;
-  const b = second.color.value;
-  const alpha = a.a * w1 + b.a * w2;
-  if (alpha === 0) return rgba(0, 0, 0, 0);
-  const { to, from } = mixSpace(space);
-  const x = to(a);
-  const y = to(b);
-  const mixed = x.map(
-    (value, index) => (value * a.a * w1 + (y[index] as number) * b.a * w2) / alpha,
-  ) as [number, number, number];
-  return from(mixed, alpha * Math.min(1, total));
+  if (UNMIXED[space] === true || first.color.kind === 'unknown' || second.color.kind === 'unknown')
+    return { kind: 'unknown', text: `color-mix(in ${space})` };
+  const deferred: Mix = {
+    kind: 'mix',
+    space,
+    hue: method,
+    first: first.color,
+    second: second.color,
+    weights: [p1 / total, p2 / total],
+    scale: Math.min(1, total),
+  };
+  if (first.color.kind !== 'rgba' || second.color.kind !== 'rgba') return deferred;
+  return { kind: 'rgba', value: mix(deferred, first.color.value, second.color.value) };
 }
 
 /**
@@ -557,7 +744,7 @@ export function toHex({ r, g, b, a }: RGBA): string {
   return `#${byte(r)}${byte(g)}${byte(b)}${a < 1 ? byte(a) : ''}`;
 }
 
-/** Resolves scheme-dependent colors and `currentcolor`. */
+/** Resolves scheme-dependent colors, `currentcolor`, and mixes of them. */
 export function resolveColor(color: Color, current: RGBA | null, scheme: Scheme): RGBA | null {
   switch (color.kind) {
     case 'rgba':
@@ -566,6 +753,11 @@ export function resolveColor(color: Color, current: RGBA | null, scheme: Scheme)
       return current;
     case 'scheme':
       return resolveColor(scheme === 'dark' ? color.dark : color.light, current, scheme);
+    case 'mix': {
+      const first = resolveColor(color.first, current, scheme);
+      const second = resolveColor(color.second, current, scheme);
+      return first === null || second === null ? null : mix(color, first, second);
+    }
     default:
       return null;
   }

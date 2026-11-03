@@ -491,6 +491,63 @@ export const cases: Case[] = [
     hidden: [['low-contrast', 'black on black']],
   },
   {
+    name: 'transparent text over a backdrop of any kind',
+    html: '<!doctype html><body style="background-image: url(bg.jpg)"><p style="color: transparent">transparent</p><p style="-webkit-text-fill-color: transparent">transparent fill</p><svg><text fill-opacity="0">transparent svg</text></svg></body>',
+    visible: '',
+    hidden: [
+      ['transparent-text', 'transparent'],
+      ['transparent-text', 'transparent fill'],
+      ['transparent-text', 'transparent svg'],
+    ],
+  },
+  {
+    name: 'a background clipped to the text paints the glyphs',
+    html: '<h1 style="background: linear-gradient(red, blue); -webkit-background-clip: text; color: transparent">gradient title</h1><p style="background-color: black; background-clip: text; color: transparent">clipped color</p><p style="background-clip: text; color: transparent">nothing to clip</p>',
+    visible: 'gradient title\n\nclipped color',
+    hidden: [['transparent-text', 'nothing to clip']],
+  },
+  {
+    name: 'large positioned boxes and table columns may paint behind text',
+    html: '<div style="position: fixed; inset: 0; background: #111"></div><main style="color: #eee"><p>dark theme</p></main><section style="position: relative"><div style="position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6)"></div><h1 style="position: relative; color: #fff">hero</h1></section><table><colgroup><col style="background: #000"></colgroup><tr><td style="color: #fff">cell</td></tr></table>',
+    visible: 'dark theme\n\nhero\ncell',
+  },
+  {
+    name: 'small positioned boxes, and boxes of the same color, do not',
+    html: '<div style="position: relative"><div style="position: absolute; width: 10px; height: 10px; background: #000"></div><p style="color: #fff">beside a small box</p></div><div style="position: relative"><div style="position: absolute; inset: 0; background: #fff"></div><p style="color: #fff">over a white box</p></div>',
+    visible: '',
+    hidden: [
+      ['low-contrast', 'beside a small box'],
+      ['low-contrast', 'over a white box'],
+    ],
+  },
+  {
+    name: 'the body background paints the canvas, below fixed backdrops',
+    html: '<!doctype html><body style="background: #fff"><div style="position: fixed; inset: 0; background: #111"></div><p style="color: #eee">over a fixed backdrop</p></body>',
+    visible: 'over a fixed backdrop',
+  },
+  {
+    name: 'an invalid background shorthand keeps the background before it',
+    html: '<!doctype html><body style="background: #000"><div style="background: #fff; background: derp"><span style="color: #fff">white on white</span></div><div style="background: #fff; background: 0 0 / cover no-repeat fixed padding-box"><span style="color: #fff">white on black</span></div></body>',
+    visible: 'white on black',
+    hidden: [['low-contrast', 'white on white']],
+  },
+  {
+    name: 'strokes and shadows too faint to draw the glyphs',
+    html: '<p style="color: #fff; -webkit-text-stroke: 0.1px #000">hairline</p><p style="color: transparent; text-shadow: 0 0 60px red">blurred</p><p style="color: #fff; text-shadow: 1% 1% #000">percent offsets</p><p style="color: transparent; text-shadow: 0 0 1px #000">crisp shadow</p>',
+    visible: 'crisp shadow',
+    hidden: [
+      ['low-contrast', 'hairline'],
+      ['transparent-text', 'blurred'],
+      ['low-contrast', 'percent offsets'],
+    ],
+  },
+  {
+    name: 'color-mix() of the inherited color',
+    html: '<div style="color: #fff"><span style="color: color-mix(in srgb, currentcolor, white)">mixed white</span></div><div style="color: #000"><span style="color: color-mix(in srgb, currentcolor 80%, white)">mixed dark</span></div>',
+    visible: 'mixed dark',
+    hidden: [['low-contrast', 'mixed white']],
+  },
+  {
     name: 'SVG text paints with fill',
     html: '<svg><text fill="white">a</text><text fill-opacity="0">b</text><text fill="red; display: none">kept</text></svg>',
     visible: 'kept',

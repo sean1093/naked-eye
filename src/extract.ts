@@ -131,6 +131,11 @@ const ROOT_FRAME: Frame = {
 };
 
 const LIGHT_CANVAS: RGBA = { r: 1, g: 1, b: 1, a: 1 };
+const TRANSPARENT: RGBA = { r: 0, g: 0, b: 0, a: 0 };
+/** A text stroke thinner than this many CSS pixels draws nothing legible. */
+const MIN_STROKE = 0.5;
+/** A text shadow blurred by more than this fraction of the font size draws nothing legible. */
+const MAX_SHADOW_BLUR = 0.25;
 const DARK_CANVAS: RGBA = { r: 0x12 / 255, g: 0x12 / 255, b: 0x12 / 255, a: 1 };
 
 const isElement = (node: AnyNode): node is Element =>
@@ -237,11 +242,13 @@ class Extractor {
   private readonly worlds: World[];
   private readonly rootClipsX: boolean;
   private readonly rootClipsY: boolean;
+  private readonly body: Element | undefined;
 
   constructor(
     private readonly engine: StyleEngine,
     private readonly limits: Limits,
-    root: Element | undefined,
+    private readonly root: Element | undefined,
+    private readonly viewport: { width: number; height: number },
   ) {
     this.worlds = engine.worlds === 2 ? [0, 1] : [0];
     // Content pushed beyond the right or bottom edge can be scrolled to, unless
@@ -249,6 +256,7 @@ class Extractor {
     const body = root?.children.find(
       (child): child is Element => isElement(child) && child.name === 'body',
     );
+    this.body = body;
     const clipsAxis = (axis: 'overflowX' | 'overflowY'): boolean =>
       [root, body].some(
         (element) =>
@@ -262,38 +270,166 @@ class Extractor {
     return { reason, selector: this.selectorOf(element), detail };
   }
 
-  private readonly backgrounds: Map<Element, RGBA | null>[] = [new Map(), new Map()];
+  private readonly backdrops: Map<Element, RGBA[] | null>[] = [new Map(), new Map()];
+  private readonly textClips: Map<Element, RGBA | null | undefined>[] = [new Map(), new Map()];
+  private readonly painters: (Map<Element, (RGBA | null)[]> | undefined)[] = [undefined, undefined];
 
   /**
-   * The opaque color behind an element's content: its background and its
-   * ancestors' composited over the canvas. `null` when an image is in the
-   * way or a color cannot be evaluated: contrast is then unknown.
+   * Boxes that can paint behind text they are not an ancestor of, by the
+   * element under whose content they may lie: large absolutely positioned
+   * and fixed boxes with a background, under their containing block, and
+   * table columns, under their table. `null` is an image or an unknown color.
    */
-  private backgroundOf(element: Element, world: World): RGBA | null {
-    const cache = this.backgrounds[world] as Map<Element, RGBA | null>;
+  private paintersIn(world: World): Map<Element, (RGBA | null)[]> {
+    const known = this.painters[world];
+    if (known !== undefined) return known;
+    const painters = new Map<Element, (RGBA | null)[]>();
+    this.painters[world] = painters;
+    const visit = (nodes: AnyNode[]): void => {
+      for (const node of nodes) {
+        if (isElement(node) === false) continue;
+        const style = this.engine.style(node, world);
+        if (style.display.kind === 'none') continue;
+        const container = this.paintsUnder(node, style, world);
+        if (container !== null) {
+          const { backgroundColor: color } = style;
+          const paint =
+            style.backgroundImage || color === null
+              ? null
+              : { ...color, a: color.a * style.opacity };
+          const list = painters.get(container);
+          if (list === undefined) painters.set(container, [paint]);
+          else list.push(paint);
+        }
+        visit(node.children);
+      }
+    };
+    if (this.root !== undefined) visit([this.root]);
+    return painters;
+  }
+
+  /** The element whose content a box may paint a background under, or `null`. */
+  private paintsUnder(element: Element, style: Style, world: World): Element | null {
+    const color = style.backgroundColor;
+    if (style.backgroundClipText || style.visibility !== 'visible') return null;
+    if (style.backgroundImage === false && color !== null && color.a === 0) return null;
+    if (
+      element.namespace === HTML_NAMESPACE &&
+      (element.name === 'col' || element.name === 'colgroup')
+    ) {
+      for (let node = element.parent; node !== null && isElement(node); node = node.parent)
+        if (node.name === 'table') return node;
+      return null;
+    }
+    if (style.position !== 'absolute' && style.position !== 'fixed') return null;
+    // A small box, one sized by its content, or one pinned to a corner covers too little to be a page's backdrop.
+    const large = (
+      size: Style['width'],
+      start: Style['left'],
+      end: Style['left'],
+      viewport: number,
+    ) =>
+      (start !== 'auto' && end !== 'auto') ||
+      size === 'unknown' ||
+      (typeof size === 'number' && size >= viewport / 4);
+    if (
+      large(style.width, style.left, style.right, this.viewport.width) === false ||
+      large(style.height, style.top, style.bottom, this.viewport.height) === false
+    )
+      return null;
+    for (let node = element.parent; node !== null && isElement(node); node = node.parent) {
+      const ancestor = this.engine.style(node, world);
+      const containsFixed =
+        ancestor.transform.length > 0 || ancestor.perspective !== null || ancestor.contain.paint;
+      if (containsFixed || (style.position === 'absolute' && ancestor.position !== 'static'))
+        return node;
+    }
+    return this.root ?? null;
+  }
+
+  /**
+   * The colors that may lie behind an element's content, at most 16: its
+   * background and its ancestors' composited over the canvas, and that stack
+   * under each box that may paint beneath an ancestor's content. `null` when
+   * an image or an unknown color is in the way: contrast is then unknown.
+   */
+  private backdropsOf(element: Element, world: World): RGBA[] | null {
+    const cache = this.backdrops[world] as Map<Element, RGBA[] | null>;
     const cached = cache.get(element);
     if (cached !== undefined) return cached;
     const style = this.engine.style(element, world);
-    let result: RGBA | null;
-    if (style.backgroundImage || style.backgroundColor === null) result = null;
-    else if (style.backgroundColor.a >= 1) result = style.backgroundColor;
-    else {
-      const parent = element.parent !== null && isElement(element.parent) ? element.parent : null;
-      const below =
-        parent === null
-          ? style.colorScheme === 'dark'
-            ? DARK_CANVAS
-            : LIGHT_CANVAS
-          : this.backgroundOf(parent, world);
-      result =
-        below === null
-          ? null
-          : style.backgroundColor.a === 0
+    const parent = element.parent !== null && isElement(element.parent) ? element.parent : null;
+    const layerOf = (of: Style): { color: RGBA | null; image: boolean } =>
+      of.backgroundClipText
+        ? { color: TRANSPARENT, image: false }
+        : { color: of.backgroundColor, image: of.backgroundImage };
+    let layer = layerOf(style);
+    if (
+      this.body !== undefined &&
+      this.root !== undefined &&
+      (element === this.root || element === this.body)
+    ) {
+      const root = layerOf(this.engine.style(this.root, world));
+      if (root.image === false && root.color !== null && root.color.a === 0) {
+        // A transparent root paints the body's background on the canvas, and the body paints none.
+        layer =
+          element === this.body
+            ? { color: TRANSPARENT, image: false }
+            : layerOf(this.engine.style(this.body, world));
+      }
+    }
+    const { color, image } = layer;
+    let result: RGBA[] | null = null;
+    const below =
+      color === null || color.a >= 1
+        ? []
+        : parent === null
+          ? [style.colorScheme === 'dark' ? DARK_CANVAS : LIGHT_CANVAS]
+          : this.backdropsOf(parent, world);
+    if (image === false && color !== null && below !== null) {
+      const stack =
+        color.a >= 1
+          ? [color]
+          : color.a === 0
             ? below
-            : over(style.backgroundColor, below);
+            : below.map((backdrop) => over(color, backdrop));
+      const painters = this.paintersIn(world).get(element);
+      if (painters === undefined) result = stack;
+      else if (painters.includes(null) === false) {
+        result = [...stack];
+        const seen = new Set(result.map(toHex));
+        for (const painter of painters as RGBA[]) {
+          for (const backdrop of stack) {
+            const composite = over(painter, backdrop);
+            const key = toHex(composite);
+            if (result.length < 16 && seen.has(key) === false) {
+              seen.add(key);
+              result.push(composite);
+            }
+          }
+        }
+      }
     }
     cache.set(element, result);
     return result;
+  }
+
+  /**
+   * The ink a background clipped to the text paints the glyphs with, from the
+   * element or an ancestor: `null` for an image or an unknown color,
+   * `undefined` when there is none.
+   */
+  private textClipOf(element: Element, world: World): RGBA | null | undefined {
+    const cache = this.textClips[world] as Map<Element, RGBA | null | undefined>;
+    if (cache.has(element)) return cache.get(element);
+    const style = this.engine.style(element, world);
+    const parent = element.parent !== null && isElement(element.parent) ? element.parent : null;
+    let ink: RGBA | null | undefined;
+    if (style.backgroundClipText && (style.backgroundImage || style.backgroundColor?.a !== 0))
+      ink = style.backgroundImage ? null : style.backgroundColor;
+    else ink = parent === null ? undefined : this.textClipOf(parent, world);
+    cache.set(element, ink);
+    return ink;
   }
 
   /** Transparent or low-contrast text: every ink that draws the glyphs is invisible. */
@@ -304,35 +440,46 @@ class Extractor {
     parent: Frame,
     world: World,
   ): Verdict | null {
-    const background = this.backgroundOf(element, world);
-    if (background === null) return null;
     const inks: (RGBA | null)[] = [];
     const withAlpha = (ink: RGBA | null, alpha: number): RGBA | null =>
       ink === null ? null : { ...ink, a: ink.a * alpha };
     if (element.namespace === SVG_NAMESPACE) {
       if (style.svgFill !== 'none') inks.push(withAlpha(style.svgFill, style.fillOpacity));
-      if (style.svgStroke !== 'none' && style.svgStrokeWidth > 0)
+      if (style.svgStroke !== 'none' && style.svgStrokeWidth * frame.scale >= MIN_STROKE)
         inks.push(withAlpha(style.svgStroke, style.strokeOpacity));
     } else {
       inks.push(style.textFill);
-      if (style.strokeWidth > 0) inks.push(style.strokeColor);
-      inks.push(...style.shadows);
+      // A hairline stroke, or a shadow blurred far wider than the glyphs, draws nothing legible.
+      if (style.strokeWidth * frame.scale >= MIN_STROKE) inks.push(style.strokeColor);
+      for (const shadow of style.shadows)
+        if (shadow.blur <= style.fontSize * MAX_SHADOW_BLUR) inks.push(shadow.color);
+      const clip = this.textClipOf(element, world);
+      if (clip !== undefined) inks.push(clip);
     }
     if (inks.includes(null)) return null;
-    let best = 0;
-    let painted = false;
-    for (const ink of inks as RGBA[]) {
-      const alpha = ink.a * frame.opacity;
-      if (alpha <= 0) continue;
-      painted = true;
-      best = Math.max(best, contrast(over({ ...ink, a: alpha }, background), background));
+    const fill = inks[0] ?? TRANSPARENT;
+    const painted = (inks as RGBA[])
+      .map((ink) => ({ ...ink, a: ink.a * frame.opacity }))
+      .filter((ink) => ink.a > 0);
+    let verdict: [HiddenReason, string];
+    if (painted.length === 0) {
+      // Fully transparent ink is invisible over any backdrop, known or not.
+      verdict = ['transparent-text', `text color ${toHex(fill)} is fully transparent`];
+    } else {
+      const backdrops = this.backdropsOf(element, world);
+      if (backdrops === null) return null;
+      let best = 0;
+      for (const backdrop of backdrops) {
+        for (const ink of painted) best = Math.max(best, contrast(over(ink, backdrop), backdrop));
+        if (best >= this.limits.minContrast) return null;
+      }
+      const behind = backdrops[0] as RGBA;
+      verdict = [
+        'low-contrast',
+        `${toHex(fill)} on ${toHex(behind)}, contrast ${best.toFixed(2)}:1`,
+      ];
     }
-    if (painted && best >= this.limits.minContrast) return null;
-    const fill = inks[0] ?? { r: 0, g: 0, b: 0, a: 0 };
-    const reason: HiddenReason = painted ? 'low-contrast' : 'transparent-text';
-    const detail = painted
-      ? `${toHex(fill)} on ${toHex(background)}, contrast ${best.toFixed(2)}:1`
-      : `text color ${toHex(fill)} is fully transparent`;
+    const [reason, detail] = verdict;
     if (parent.color?.reason === reason && parent.color.detail === detail) return parent.color;
     return this.verdict(reason, element, detail);
   }
@@ -693,7 +840,7 @@ export function extractVisible(html: string, options: ExtractOptions = {}): Extr
   const root = document.children.find(
     (child): child is Element => isElement(child) && child.name === 'html',
   );
-  const extractor = new Extractor(engine, limits, root);
+  const extractor = new Extractor(engine, limits, root, viewport);
   const frames = engine.worlds === 2 ? [ROOT_FRAME, ROOT_FRAME] : [ROOT_FRAME];
   const tree = extractor.build(
     document.children,

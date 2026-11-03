@@ -25,6 +25,14 @@ export type Expr =
 
 export type Kind = 'number' | 'length' | 'angle' | 'time' | 'resolution';
 
+/** Whether an expression mentions a percentage anywhere. */
+export function hasPercentage(expr: Expr): boolean {
+  if (expr.op === 'value') return expr.unit === '%';
+  if (expr.op === 'fn') return expr.args.some((arg) => arg !== null && hasPercentage(arg));
+  if (expr.op === 'sibling') return false;
+  return hasPercentage(expr.a) || hasPercentage(expr.b);
+}
+
 /** A typed result. A length is `px + pct%`; `unknown` marks a value that needs layout. */
 export interface Typed {
   kind: Kind;

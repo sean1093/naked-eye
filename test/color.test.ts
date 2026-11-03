@@ -24,6 +24,13 @@ describe('colors a browser rejects fall back to the previous declaration', () =>
     'color-mix(white, black)',
     'color-mix(in srgb, white, nope)',
     'color-mix(in srgb, white 0%, black 0%)',
+    'color-mix(in srgb, black 150%, black)',
+    'color-mix(in nospace, black, black)',
+    'color-mix(in hsl longer, black, black)',
+    'color-mix(in srgb shorter hue, black, black)',
+    'rgb(0, 0%, 0)',
+    'rgb(none, 0, 0)',
+    'hsl(0, 0, 0)',
     'notacolor(1 2 3)',
     'white black',
   ])('%s', (color) => {
@@ -49,6 +56,12 @@ describe('colors a browser accepts', () => {
     ['oklab(100% 0% 0%)', 'low-contrast'],
     ['oklch(100% 0% 0deg)', 'low-contrast'],
     ['hsl(0deg 0 100)', 'low-contrast'],
+    ['rgb(calc(100%) calc(100%) calc(100%))', 'low-contrast'],
+    ['hsl(0 calc(0%) calc(100%))', 'low-contrast'],
+    ['hsl(0 -1000% 50%)', undefined],
+    ['color-mix(in lab, white 70%, black)', undefined],
+    ['color-mix(in hsl, white, white)', 'low-contrast'],
+    ['color-mix(in oklch longer hue, black, black)', undefined],
   ])('%s gives %s', (color, reason) => {
     expect(reasonFor(color)).toBe(reason);
   });
@@ -57,7 +70,7 @@ describe('colors a browser accepts', () => {
     for (const color of [
       'contrast-color(white)',
       'device-cmyk(0 0 0 0)',
-      'color-mix(in srgb, currentcolor, white)',
+      'color-mix(in display-p3, white, black)',
     ]) {
       const result = extractVisible(`<!doctype html><p style="color: ${color}">kept</p>`);
       expect(result.text).toBe('kept');

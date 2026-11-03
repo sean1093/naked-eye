@@ -15,7 +15,14 @@ import {
 } from '@csstools/css-parser-algorithms';
 import { TokenType } from '@csstools/css-tokenizer';
 import { own } from '../util.js';
-import { type Context, type Expr, evaluate, isMathFunction, parseNumeric } from './calc.js';
+import {
+  type Context,
+  type Expr,
+  evaluate,
+  hasPercentage,
+  isMathFunction,
+  parseNumeric,
+} from './calc.js';
 import { type Color, parseColor, rgba } from './color.js';
 import { identOf, isToken, significant, splitCommas, stringOf, tokenOf } from './syntax.js';
 
@@ -95,11 +102,13 @@ export interface Values {
   'background-color': Color;
   /** Whether any background layer paints an image (a gradient that is fully transparent does not). */
   'background-image': boolean;
+  /** Whether any background layer is clipped to the glyphs of the text (`background-clip: text`). */
+  'background-clip': boolean;
   '-webkit-text-fill-color': Color;
   '-webkit-text-stroke-width': Expr;
   '-webkit-text-stroke-color': Color;
-  /** The color of each shadow layer. */
-  'text-shadow': Color[];
+  /** Each shadow layer's color and blur radius. */
+  'text-shadow': { color: Color; blur: Expr }[];
   'color-scheme': { light: boolean; dark: boolean } | 'normal';
   /** SVG paint: a color, `none`, or a paint server this engine does not evaluate. */
   fill: Paint;
@@ -755,24 +764,102 @@ function parseBackgroundImage(nodes: ComponentValue[]): boolean | null {
   return paints;
 }
 
-/** The `background` shorthand, read leniently: its color, and whether any layer paints an image. */
+const BACKGROUND_BOXES = ['border-box', 'padding-box', 'content-box'];
+const BACKGROUND_REPEATS = ['repeat-x', 'repeat-y', 'repeat', 'space', 'round', 'no-repeat'];
+const BACKGROUND_ATTACHMENTS = ['scroll', 'fixed', 'local'];
+const BACKGROUND_POSITIONS = ['left', 'right', 'top', 'bottom', 'center'];
+const BACKGROUND_SIZES = ['auto', 'cover', 'contain'];
+
+/**
+ * The `background` shorthand: its color, and whether any layer paints an
+ * image. Every component must be valid, or a browser drops the declaration
+ * and the background cascaded before it keeps painting.
+ */
 function parseBackground(nodes: ComponentValue[]): Partial<Values> | null {
   const layers = splitCommas(nodes).map(significant);
   let color: Color | null = null;
   let image = false;
   for (const [index, layer] of layers.entries()) {
-    for (const node of layer) {
-      const parsed = parseColor([node]);
-      if (parsed !== null) {
-        if (index !== layers.length - 1 || color !== null) return null;
-        color = parsed;
+    if (layer.length === 0) return null;
+    const counts = { image: 0, color: 0, attachment: 0, box: 0, repeat: 0, position: 0 };
+    let position: 'none' | 'open' | 'closed' = 'none';
+    for (let at = 0; at < layer.length; at += 1) {
+      const node = layer[at] as ComponentValue;
+      const word = identOf(node);
+      const isPosition =
+        (word !== undefined && BACKGROUND_POSITIONS.includes(word)) ||
+        lengthPercentage(node, false) !== null;
+      if (isPosition && position !== 'closed') {
+        position = 'open';
+        counts.position += 1;
         continue;
       }
-      if (tokenOf(node)?.[0] === TokenType.URL || isFunctionNode(node))
-        image ||= paintsImage([node]) === true;
+      if (position === 'open') position = 'closed';
+      if (isToken(node, TokenType.Delim) && stringOf(node) === '/') {
+        // A size follows the position directly: one or two values, or cover or contain alone.
+        if (at === 0 || counts.position === 0 || position !== 'closed') return null;
+        const sizes: ComponentValue[] = [];
+        while (sizes.length < 2) {
+          const next = layer[at + 1];
+          const size = identOf(next);
+          const valid =
+            next !== undefined &&
+            ((size !== undefined && BACKGROUND_SIZES.includes(size)) ||
+              lengthPercentage(next, false, true) !== null);
+          if (valid === false) break;
+          sizes.push(next as ComponentValue);
+          at += 1;
+        }
+        const words = sizes.map((size) => identOf(size));
+        if (
+          sizes.length === 0 ||
+          (sizes.length === 2 && words.some((size) => size === 'cover' || size === 'contain'))
+        )
+          return null;
+        continue;
+      }
+      if (word !== undefined && BACKGROUND_REPEATS.includes(word)) counts.repeat += 1;
+      else if (word !== undefined && BACKGROUND_ATTACHMENTS.includes(word)) counts.attachment += 1;
+      else if (word !== undefined && BACKGROUND_BOXES.includes(word)) counts.box += 1;
+      else {
+        const paints = paintsImage([node]);
+        if (paints !== null) {
+          counts.image += 1;
+          image ||= paints;
+          continue;
+        }
+        const parsed = parseColor([node]);
+        if (parsed === null || index !== layers.length - 1) return null;
+        counts.color += 1;
+        color = parsed;
+      }
     }
+    if (
+      counts.image > 1 ||
+      counts.color > 1 ||
+      counts.attachment > 1 ||
+      counts.box > 2 ||
+      counts.repeat > 2 ||
+      counts.position > 4
+    )
+      return null;
   }
-  return { 'background-color': color ?? rgba(0, 0, 0, 0), 'background-image': image };
+  return {
+    'background-color': color ?? rgba(0, 0, 0, 0),
+    'background-image': image,
+    'background-clip': false,
+  };
+}
+
+/** `background-clip`: whether any layer is clipped to the text. */
+function parseBackgroundClip(nodes: ComponentValue[]): boolean | null {
+  let text = false;
+  for (const layer of splitCommas(nodes).map(significant)) {
+    const word = layer.length === 1 ? identOf(layer[0]) : undefined;
+    if (word === 'text') text = true;
+    else if (word === undefined || BACKGROUND_BOXES.includes(word) === false) return null;
+  }
+  return text;
 }
 
 const STROKE_KEYWORDS: Record<string, number> = { thin: 1, medium: 3, thick: 5 };
@@ -783,20 +870,28 @@ function strokeWidth(node: ComponentValue | undefined): Expr | null {
   return lengthPercentage(node, false, true);
 }
 
-function parseShadows(nodes: ComponentValue[]): Color[] | null {
+/** `text-shadow`: per layer, an optional color first or last and two or three lengths. */
+function parseShadows(nodes: ComponentValue[]): Values['text-shadow'] | null {
   if (identOf(single(nodes) ?? undefined) === 'none') return [];
-  const shadows: Color[] = [];
+  const shadows: Values['text-shadow'] = [];
   for (const part of splitCommas(nodes).map(significant)) {
     let color: Color | null = null;
-    let lengths = 0;
-    for (const node of part) {
+    const lengths: Expr[] = [];
+    for (const [index, node] of part.entries()) {
       const parsed = parseColor([node]);
-      if (parsed !== null && color === null) color = parsed;
-      else if (lengthPercentage(node, false) !== null) lengths += 1;
-      else return null;
+      if (parsed !== null && color === null && (index === 0 || index === part.length - 1)) {
+        color = parsed;
+        continue;
+      }
+      // Offsets and blur are lengths; a percentage makes the declaration invalid.
+      const length = lengthPercentage(node, false);
+      if (length === null || hasPercentage(length)) return null;
+      lengths.push(length);
     }
-    if (lengths < 2 || lengths > 3) return null;
-    shadows.push(color ?? { kind: 'currentcolor' });
+    const blur = lengths[2] ?? ZERO;
+    if (lengths.length < 2 || lengths.length > 3 || (blur.op === 'value' && blur.value < 0))
+      return null;
+    shadows.push({ color: color ?? { kind: 'currentcolor' }, blur });
   }
   return shadows;
 }
@@ -1011,6 +1106,7 @@ export const LONGHANDS: Definitions = {
     parse: (nodes) => parseColor(nodes),
   },
   'background-image': { inherited: false, initial: false, parse: parseBackgroundImage },
+  'background-clip': { inherited: false, initial: false, parse: parseBackgroundClip },
   '-webkit-text-fill-color': {
     inherited: true,
     initial: { kind: 'currentcolor' },
@@ -1229,6 +1325,7 @@ export type Parsed = Partial<Values>;
  * horizontal, left-to-right writing mode this engine assumes.
  */
 const ALIASES: Record<string, string> = {
+  '-webkit-background-clip': 'background-clip',
   '-webkit-filter': 'filter',
   '-webkit-transform': 'transform',
   '-webkit-clip-path': 'clip-path',
@@ -1327,7 +1424,7 @@ export function longhandsOf(alias: string): Longhand[] {
     case 'padding-inline':
       return ['padding-left', 'padding-right'];
     case 'background':
-      return ['background-color', 'background-image'];
+      return ['background-color', 'background-image', 'background-clip'];
     case '-webkit-text-stroke':
       return ['-webkit-text-stroke-width', '-webkit-text-stroke-color'];
     case 'animation':
