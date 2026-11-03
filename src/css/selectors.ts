@@ -5,7 +5,8 @@
  */
 import { compile, type Options } from 'css-select';
 import { type AttributeSelector, parse, type Selector, SelectorType } from 'css-what';
-import type { AnyNode, Element } from 'domhandler';
+import { type AnyNode, type Element, isTag, type ParentNode } from 'domhandler';
+import * as DomUtils from 'domutils';
 import { own } from '../util.js';
 
 export type Specificity = readonly [number, number, number];
@@ -17,6 +18,10 @@ export interface CompiledSelector {
   pseudoElement: string | null;
   /** Index key of the rightmost compound: `#id`, `.class`, a tag name, or `*`. */
   bucket: string;
+  /** Uses `:host-context()`, which only Chromium supports: the rule exists in the second world only. */
+  conditional: boolean;
+  /** For `::part()`: the names the part must all carry; `test` then matches the host exposing it. */
+  part: string[] | null;
 }
 
 /**
@@ -394,6 +399,17 @@ export function specificityOf(complex: Selector[], nesting: Nesting = {}): Speci
       total[isIdSelector(token) ? 0 : 1] += 1;
     } else if (token.type === 'tag' || token.type === 'pseudo-element') {
       total[2] += 1;
+      if (
+        token.type === 'pseudo-element' &&
+        token.name === 'slotted' &&
+        typeof token.data === 'string'
+      ) {
+        try {
+          add(total, maxOf(parse(token.data), nesting));
+        } catch {
+          // An unparsable argument makes the whole selector invalid; compilation reports it.
+        }
+      }
     } else if (token.type === 'pseudo') {
       if (token.name === 'where') continue;
       const parent = own(nesting, token.name);
@@ -402,6 +418,11 @@ export function specificityOf(complex: Selector[], nesting: Nesting = {}): Speci
         continue;
       }
       if (Array.isArray(token.data) && SELECTOR_ARGUMENT[token.name] === true) {
+        add(total, maxOf(token.data, nesting));
+        continue;
+      }
+      if (Array.isArray(token.data) && (token.name === 'host' || token.name === 'host-context')) {
+        total[1] += 1;
         add(total, maxOf(token.data, nesting));
         continue;
       }
@@ -500,6 +521,10 @@ function bucketOf(complex: Selector[], quirks: boolean): string {
   let start = complex.length;
   while (start > 0 && COMBINATORS[(complex[start - 1] as Selector).type] !== true) start -= 1;
   const compound = complex.slice(start);
+  // A rule whose subject is the shadow host is looked up when styling the host.
+  if (compound.some((token) => token.type === 'pseudo' && token.name.startsWith('-ne-host-'))) {
+    return ':host';
+  }
   if (!quirks) {
     for (const token of compound) {
       if (token.type === 'attribute' && isIdSelector(token)) return `#${token.value}`;
@@ -522,6 +547,58 @@ function bucketOf(complex: Selector[], quirks: boolean): string {
   return '*';
 }
 
+/** The shadow tree a style sheet belongs to: its host, its root fragment, and its slotting. */
+export interface ShadowScope {
+  host: Element;
+  fragment: ParentNode;
+  /** The slot in this shadow tree a light node is assigned to. */
+  slotOf: (element: Element) => Element | undefined;
+}
+
+/**
+ * Tree traversal as seen from inside a shadow tree: the shadow tree's
+ * top-level elements have the host as their parent, and nothing is above the
+ * host.
+ */
+function scopedAdapter(scope: ShadowScope): Options<AnyNode, Element>['adapter'] {
+  return {
+    ...DomUtils,
+    isTag,
+    getParent: (node: AnyNode) => {
+      if (node === scope.host) return null;
+      if (node.parent === scope.fragment) return scope.host;
+      const parent = DomUtils.getParent(node);
+      return parent !== null && parent.type === 'tag' ? parent : null;
+    },
+  };
+}
+
+/** Pseudo-classes and pseudo-elements whose argument is one compound selector. */
+const COMPOUND_ARGUMENT: Record<string, true> = { host: true, 'host-context': true, slotted: true };
+
+/** A single compound selector: no combinator and no pseudo-element. */
+function isCompound(argument: Selector[][]): boolean {
+  return (
+    argument.length === 1 &&
+    (argument[0] as Selector[]).every(
+      (token) => COMBINATORS[token.type] !== true && token.type !== 'pseudo-element',
+    )
+  );
+}
+
+/** A CSS identifier, as `::part()` names must be. */
+const IDENT = /^(?:--|-?[_a-zA-Z\u0080-\u{10FFFF}])[-\w\u0080-\u{10FFFF}]*$/u;
+
+/** `:host-context()` matches only in Chromium; Firefox and Safari drop every rule that uses it. */
+function usesHostContext(complex: Selector[]): boolean {
+  return complex.some(
+    (token) =>
+      token.type === 'pseudo' &&
+      (token.name === 'host-context' ||
+        (Array.isArray(token.data) && token.data.some(usesHostContext))),
+  );
+}
+
 /** `syntax` is true for a selector no browser accepts, false for one css-select cannot evaluate. */
 export type SelectorListResult =
   | { selectors: CompiledSelector[] }
@@ -537,6 +614,7 @@ export function compileSelectorList(
   quirks: boolean,
   nesting: Nesting = {},
   namespaces: Readonly<Record<string, string>> = {},
+  scope: ShadowScope | null = null,
 ): SelectorListResult {
   let list: Selector[][];
   try {
@@ -546,12 +624,27 @@ export function compileSelectorList(
   }
   for (const complex of list) {
     for (const token of complex) {
-      if (token.type !== 'pseudo-element') continue;
-      if (PSEUDO_ELEMENTS[token.name] !== true && !/^-(webkit|moz)-/.test(token.name)) {
+      if (token.type !== 'pseudo-element' && token.type !== 'pseudo') continue;
+      if (
+        token.type === 'pseudo-element' &&
+        PSEUDO_ELEMENTS[token.name] !== true &&
+        !/^-(webkit|moz)-/.test(token.name)
+      ) {
         return { error: `Unknown pseudo-element ::${token.name}`, syntax: true };
+      }
+      if (COMPOUND_ARGUMENT[token.name] !== true || token.data === null) continue;
+      let argument: Selector[][] | null = null;
+      try {
+        argument = typeof token.data === 'string' ? parse(token.data) : token.data;
+      } catch {
+        // An unparsable argument fails the check below.
+      }
+      if (argument === null || !isCompound(argument)) {
+        return { error: `${token.name}() takes one compound selector`, syntax: true };
       }
     }
   }
+  const conditional = list.map(usesHostContext);
   const pseudos: Options<AnyNode, Element>['pseudos'] = {
     ...PSEUDOS,
     '-ne-namespace': (element: Element, url?: string | null) => element.namespace === url,
@@ -559,6 +652,43 @@ export function compileSelectorList(
   for (const [name, parent] of Object.entries(nesting))
     pseudos[name] = (element: Element) => parent.test(element);
   const options: Options<AnyNode, Element> = { quirksMode: quirks, pseudos };
+  const lightOptions: Options<AnyNode, Element> = { quirksMode: quirks, pseudos: { ...pseudos } };
+  if (scope !== null) {
+    options.adapter = scopedAdapter(scope);
+    let counter = 0;
+    // :host, :host(S) and :host-context(S) match the host from inside its shadow tree.
+    const hostTokens = (complex: Selector[]): Selector[] =>
+      complex.map((token): Selector => {
+        if (token.type !== 'pseudo') return token;
+        if (Array.isArray(token.data) && token.name !== 'host' && token.name !== 'host-context') {
+          return { ...token, data: token.data.map(hostTokens) };
+        }
+        if (token.name !== 'host' && token.name !== 'host-context') return token;
+        const name = `-ne-host-${counter++}`;
+        const inner = Array.isArray(token.data)
+          ? compile<AnyNode, Element>(
+              token.data.map((part) => rewrite(part, namespaces)),
+              lightOptions,
+            )
+          : null;
+        (pseudos as Record<string, unknown>)[name] =
+          token.name === 'host'
+            ? (element: Element) => element === scope.host && (inner === null || inner(element))
+            : (element: Element) => {
+                if (element !== scope.host) return false;
+                for (
+                  let node: Element | null = element;
+                  node !== null;
+                  node = node.parent?.type === 'tag' ? node.parent : null
+                ) {
+                  if (inner === null || inner(node)) return true;
+                }
+                return false;
+              };
+        return { type: SelectorType.Pseudo, name, data: null };
+      });
+    list = list.map(hostTokens);
+  }
   const compiles = (selector: Selector[]): boolean => {
     try {
       compile<AnyNode, Element>([rewrite(selector, namespaces)], options);
@@ -569,17 +699,50 @@ export function compileSelectorList(
   };
   const selectors: CompiledSelector[] = [];
   try {
-    for (const original of list) {
+    for (const [position, original] of list.entries()) {
       const complex = forgive(original, compiles);
       const specificity = specificityOf(complex, nesting);
       const index = complex.findIndex((token) => token.type === 'pseudo-element');
       let target = complex;
       let pseudoElement: string | null = null;
+      let part: string[] | null = null;
       if (index !== -1) {
         // Anything after a pseudo-element is a user-action state (`::before:hover`)
         // or another pseudo-element: neither matches before interaction.
         if (index !== complex.length - 1) continue;
         pseudoElement = (complex[index] as { name: string }).name;
+        const argument = (complex[index] as { data?: unknown }).data;
+        if (pseudoElement === 'slotted' && scope !== null && typeof argument === 'string') {
+          // ::slotted(S) styles the light element assigned to a matching slot.
+          let slotTarget = complex.slice(0, index);
+          const tail = slotTarget[slotTarget.length - 1];
+          if (tail === undefined || COMBINATORS[tail.type] === true) {
+            slotTarget = [...slotTarget, { type: SelectorType.Universal, namespace: null }];
+          }
+          const slotTest = compile<AnyNode, Element>([rewrite(slotTarget, namespaces)], options);
+          const argumentTest = compile<AnyNode, Element>(
+            parse(argument).map((part) => rewrite(part, namespaces)),
+            lightOptions,
+          );
+          selectors.push({
+            test: (element) => {
+              const slot = scope.slotOf(element);
+              return slot !== undefined && slotTest(slot) && argumentTest(element);
+            },
+            specificity,
+            pseudoElement: null,
+            bucket: ':slotted',
+            conditional: conditional[position] === true,
+            part: null,
+          });
+          continue;
+        }
+        if (pseudoElement === 'part') {
+          part = typeof argument === 'string' ? argument.trim().split(/\s+/) : [''];
+          if (part.some((name) => !IDENT.test(name))) {
+            return { error: `::part() takes identifiers: ${String(argument)}`, syntax: true };
+          }
+        }
         target = complex.slice(0, index);
         const last = target[target.length - 1];
         if (last === undefined || COMBINATORS[last.type] === true) {
@@ -592,6 +755,8 @@ export function compileSelectorList(
         specificity,
         pseudoElement,
         bucket: bucketOf(rewritten, quirks),
+        conditional: conditional[position] === true,
+        part,
       });
     }
   } catch (error) {

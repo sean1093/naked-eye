@@ -8,6 +8,7 @@ import { createStyleEngine, type Style, type StyleEngine, type World } from './c
 import { contrast, over, type RGBA, toHex } from './css/color.js';
 import { DepthExceededError, parseHtml } from './dom.js';
 import { assemble, type Layout, type RenderNode, type Space, type Verdict } from './render.js';
+import { attachShadowRoots, type ShadowTrees } from './shadow.js';
 import type { ExtractOptions, ExtractResult, HiddenReason, Warning } from './types.js';
 import { MAY_CONTAIN_INVISIBLE } from './unicode.js';
 import { own } from './util.js';
@@ -99,6 +100,7 @@ const SVG_TEXT: Record<string, true> = { text: true, tspan: true, textPath: true
 
 /** Reasons after which the hidden elements generate no boxes, so they add no line structure. */
 const BOXLESS: Partial<Record<HiddenReason, true>> = {
+  unslotted: true,
   'display-none': true,
   'not-rendered': true,
   collapsed: true,
@@ -326,6 +328,7 @@ class Extractor {
     private readonly limits: Limits,
     private readonly root: Element | undefined,
     private readonly viewport: { width: number; height: number },
+    private readonly shadow: ShadowTrees,
   ) {
     this.worlds = engine.worlds === 2 ? [0, 1] : [0];
     // Content pushed beyond the right or bottom edge can be scrolled to, unless
@@ -391,11 +394,20 @@ class Extractor {
               register(this.paintsUnder(node, generated, world, true), generated);
           }
         }
-        visit(node.children);
+        visit(this.flatChildren(node));
       }
     };
     if (this.root !== undefined) visit([this.root]);
     return painters;
+  }
+
+  /** An element's children in the flat tree: a host's shadow content, a slot's assigned nodes. */
+  private flatChildren(element: Element): AnyNode[] {
+    const shadowRoot = this.shadow.roots.get(element);
+    if (shadowRoot !== undefined) return shadowRoot.fragment.children;
+    if (element.name !== 'slot' || this.shadow.scopeOf(element) === null) return element.children;
+    const assigned = this.shadow.assignedNodes(element);
+    return assigned.length === 0 ? element.children : assigned;
   }
 
   /**
@@ -416,7 +428,11 @@ class Extractor {
       element.namespace === HTML_NAMESPACE &&
       (element.name === 'col' || element.name === 'colgroup')
     ) {
-      for (let node = element.parent; node !== null && isElement(node); node = node.parent)
+      for (
+        let node = this.shadow.flatParent(element);
+        node !== null;
+        node = this.shadow.flatParent(node)
+      )
         if (node.name === 'table') return node;
       return null;
     }
@@ -436,8 +452,8 @@ class Extractor {
       large(style.height, style.top, style.bottom, this.viewport.height) === false
     )
       return null;
-    const start = pseudo ? element : element.parent;
-    for (let node = start; node !== null && isElement(node); node = node.parent) {
+    const start = pseudo ? element : this.shadow.flatParent(element);
+    for (let node = start; node !== null; node = this.shadow.flatParent(node)) {
       const ancestor = this.engine.style(node, world);
       const containsFixed =
         ancestor.transform.length > 0 || ancestor.perspective !== null || ancestor.contain.paint;
@@ -458,7 +474,7 @@ class Extractor {
     const cached = cache.get(element);
     if (cached !== undefined) return cached;
     const style = this.engine.style(element, world);
-    const parent = element.parent !== null && isElement(element.parent) ? element.parent : null;
+    const parent = this.shadow.flatParent(element);
     const layerOf = (of: Style): { color: RGBA | null; image: boolean } =>
       of.backgroundClipText
         ? { color: TRANSPARENT, image: false }
@@ -523,7 +539,7 @@ class Extractor {
     const cache = this.textClips[world] as Map<Element, RGBA | null | undefined>;
     if (cache.has(element)) return cache.get(element);
     const style = this.engine.style(element, world);
-    const parent = element.parent !== null && isElement(element.parent) ? element.parent : null;
+    const parent = this.shadow.flatParent(element);
     let ink: RGBA | null | undefined;
     if (style.backgroundClipText && (style.backgroundImage || style.backgroundColor?.a !== 0))
       ink = style.backgroundImage ? null : style.backgroundColor;
@@ -628,6 +644,7 @@ class Extractor {
       ...frame,
       subtree: at(reason, detail),
     });
+
     if (namespace === SVG_NAMESPACE && own(SVG_HIDDEN, name) === true)
       return hide('not-rendered', `SVG <${name}> content`);
     if (style.display.kind === 'none') {
@@ -900,7 +917,30 @@ class Extractor {
     };
 
     let children: RenderNode[];
-    if (element.name === 'template') {
+    const shadowRoot = this.shadow.roots.get(element);
+    if (shadowRoot !== undefined) {
+      // A shadow host renders its shadow tree; light children appear only through slots.
+      children = this.build(shadowRoot.fragment.children, frames, inner, style);
+      const unslotted = this.shadow.unslotted(element);
+      if (unslotted.length > 0) {
+        const hidden = hideChildren('unslotted', 'light content no <slot> accepts');
+        for (const child of this.build(unslotted, hidden, inner, style)) children.push(child);
+      }
+    } else if (element.name === 'slot' && this.shadow.scopeOf(element) !== null) {
+      const assigned = this.shadow.assignedNodes(element);
+      children = this.build(
+        assigned.length === 0 ? element.children : assigned,
+        frames,
+        inner,
+        style,
+      );
+      if (assigned.length > 0) {
+        // A slot that renders assigned nodes does not render its own children.
+        const fallback = hideChildren('not-rendered', 'fallback content of a filled <slot>');
+        for (const child of this.build(element.children, fallback, inner, style))
+          children.push(child);
+      }
+    } else if (element.name === 'template') {
       const content = element.children[0];
       children =
         content === undefined
@@ -1089,18 +1129,23 @@ export function extractVisible(html: string, options: ExtractOptions = {}): Extr
     };
   }
 
-  const engine = createStyleEngine(document, {
-    environment: {
-      width: viewport.width,
-      height: viewport.height,
-      colorScheme: options.colorScheme ?? 'light',
+  const shadow = attachShadowRoots(document);
+  const engine = createStyleEngine(
+    document,
+    {
+      environment: {
+        width: viewport.width,
+        height: viewport.height,
+        colorScheme: options.colorScheme ?? 'light',
+      },
+      stylesheets: options.stylesheets ?? {},
     },
-    stylesheets: options.stylesheets ?? {},
-  });
+    shadow,
+  );
   const root = document.children.find(
     (child): child is Element => isElement(child) && child.name === 'html',
   );
-  const extractor = new Extractor(engine, limits, root, viewport);
+  const extractor = new Extractor(engine, limits, root, viewport, shadow);
   const frames = engine.worlds === 2 ? [ROOT_FRAME, ROOT_FRAME] : [ROOT_FRAME];
   const tree = extractor.build(
     document.children,

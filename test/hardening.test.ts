@@ -230,6 +230,18 @@ describe('hostile input stays bounded', () => {
     );
   }, 30_000);
 
+  it('handles shadow trees wider than a function call can take as arguments', () => {
+    const wide = 150_000;
+    const items = '<b>x</b>'.repeat(wide);
+    const host = (shadow: string, light: string): string =>
+      extractVisible(
+        `${STANDARDS}<body><div><template shadowrootmode="open">${shadow}</template>${light}</div></body>`,
+      ).text;
+    expect(host(items, '')).toHaveLength(wide);
+    expect(host('<slot name="a"></slot>', items)).toBe('');
+    expect(host(`<slot>${items}</slot>`, 'y')).toBe('y');
+  }, 30_000);
+
   it('parses each imported style sheet once and caps how many are applied', () => {
     const stylesheets: Record<string, string> = { 's6.css': 'p { display: none }' };
     for (let level = 0; level < 6; level += 1) {

@@ -27,7 +27,9 @@ export type HiddenReason =
   /** Contrast against the background below `minContrast`, such as white on white. */
   | 'low-contrast'
   /** Characters that render as nothing: tag characters, variation-selector runs, zero-width and bidirectional controls. */
-  | 'invisible-unicode';
+  | 'invisible-unicode'
+  /** A shadow host's light content that no `<slot>` accepts, so it is never rendered. */
+  | 'unslotted';
 
 export interface HiddenText {
   /** The removed text, with whitespace collapsed. */

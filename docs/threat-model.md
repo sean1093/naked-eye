@@ -78,7 +78,8 @@ policy, and a human in the loop for consequential actions.
 spec-compliant parser, computes the CSS cascade itself, and decides visibility
 from computed values. It does no layout, runs no scripts and makes no network
 requests, so it runs anywhere JavaScript does. Where a CSS condition cannot be
-decided without layout (`@container`, `@scope`, an unknown media feature), it
+decided without layout (`@container`, `@scope`, an unknown media feature) or
+differs between engines (`:host-context()`, which only Chromium supports), it
 evaluates the rules both ways and keeps text only if it is visible in both.
 
 **Browser mode**, `extractVisibleFromPage(page, options)`, runs inside a page
@@ -109,6 +110,7 @@ implements each row.
 | A closed disclosure | the body of `<details>` without `open` | yes | yes | `collapsed` | [#5][i5] |
 | A closed drop-down | the options of a `<select>` other than the selected one | yes | yes | `collapsed` | [#5][i5] |
 | Unslotted shadow host children | a light DOM child no `<slot>` accepts | yes | yes | `unslotted` | [#9][i9] |
+| Fallback content of a filled slot | `<slot>fallback</slot>` when light content is assigned to it | yes | yes | `not-rendered` | [#9][i9] |
 
 Script and style contents are code, not text: they are dropped without a
 finding.
@@ -133,6 +135,14 @@ The cascade is computed the way browsers compute it, because the attacker writes
 the CSS: selectors of any kind, `!important`, cascade layers, nesting, custom
 properties, media queries and `@supports` all reach the same declarations they
 reach in a browser ([#4][i4]).
+
+Declarative shadow roots (`<template shadowrootmode>`) attach where the HTML
+parser attaches them, and text follows the flat tree: shadow content in place
+of the host's children, light children at the slot that accepts them, and slot
+fallback content only when nothing is assigned. Style sheets apply only inside
+their own tree. `:host`, `::slotted()` and `::part()` (through `exportparts`)
+cross the boundary as in a browser: the outer rule wins for normal declarations
+and the inner one for `!important`. Inheritance follows the flat tree ([#9][i9]).
 
 ### Geometry
 
@@ -240,6 +250,9 @@ document, with a warning.
   could stall the regular expression engine.
 - **Shapes painted under SVG text** are not considered when judging its
   contrast.
+- **Shadow DOM** comes only from declarative shadow roots, since no script runs.
+  `::slotted()` and `::part()` followed by `::before` or `::after` are not
+  modelled.
 
 ### Both modes
 

@@ -31,6 +31,31 @@ describe('extractVisible', () => {
     ]);
   });
 
+  it('leaves code out of the findings of hidden content', () => {
+    const { hidden } = extractVisible(
+      documentOf(
+        '<div style="display: none"><style>p { color: red }</style>secret<script>run()</script></div>',
+      ),
+    );
+    expect(hidden.map((finding) => finding.text)).toEqual(['secret']);
+  });
+
+  it('evaluates :host-context() both ways, since only Chromium supports it', () => {
+    const result = extractVisible(
+      '<!doctype html><html><body class="dark"><style>@supports selector(:host-context(*)) { .supported { display: none } }</style><p class="supported">hidden where supported</p><div><template shadowrootmode="open"><style>:host-context(.dark) p { display: none } span { display: none } :host-context(.dark) span { display: block }</style><p>hidden in Chromium</p><span>shown only in Chromium</span></template></div></body></html>',
+    );
+    expect(result.text).toBe('');
+    expect(result.hidden.map((finding) => finding.text)).toEqual([
+      'hidden where supported',
+      'hidden in Chromium',
+      'shown only in Chromium',
+    ]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      'unknown-condition',
+      'unknown-condition',
+    ]);
+  });
+
   it('merges the text of one hidden element into one finding', () => {
     const { hidden } = extractVisible(documentOf('<div style="display: none">a <b>b</b> c</div>'));
     expect(hidden).toEqual([
