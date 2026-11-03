@@ -634,6 +634,36 @@ export const cases: Case[] = [
     visible: '\u201Cquoted\u201D',
   },
   {
+    name: 'a pseudo-element paints its own background behind its text',
+    html: '<style>p { background: #fff } .b::before { content: "black on black "; color: #000; background: #000 } .l::first-line { color: #000; background: #000 }</style><p class="b">x</p><p class="l">first line on black</p>',
+    visible: 'x',
+    hidden: [
+      ['low-contrast', 'black on black'],
+      ['low-contrast', 'first line on black'],
+    ],
+  },
+  {
+    name: '::first-line ignores what does not apply to it',
+    html: '<style>.n::first-line { display: none; position: absolute; left: -9999px; margin-left: -9999px; opacity: 0; zoom: 0.01; clip-path: circle(0); content-visibility: hidden }</style><p class="n">still shown</p>',
+    visible: 'still shown',
+  },
+  {
+    name: '::first-line on a positioned inline box, which is a block container',
+    html: '<style>span::first-line { font-size: 0 }</style><span style="position: absolute">positioned</span>',
+    visible: '',
+    hidden: [['font-size', 'positioned']],
+  },
+  {
+    name: 'generated text on a rule, and around a missing attribute',
+    html: '<style>hr::before { content: "rule text" } p::before { content: "A" attr(data-missing) "B" }</style><hr><p>x</p>',
+    visible: 'rule text\n\nABx',
+  },
+  {
+    name: 'the quotes property',
+    html: '<style>q::before { content: open-quote } q::after { content: close-quote } .none { quotes: none } .custom { quotes: "\u00AB" "\u00BB" }</style><p><q class="none">plain</q> <q class="custom">custom</q> <q>auto</q></p>',
+    visible: 'plain \u00ABcustom\u00BB \u201Cauto\u201D',
+  },
+  {
     name: 'pseudo-elements that generate nothing',
     html: '<style>p::before { content: none } p::after { content: normal } i::before { content: "\\f101" }</style><p>plain</p><i>icon</i>',
     visible: 'plain\n\nicon',

@@ -48,7 +48,7 @@ export type WarningCode =
   | 'unknown-condition'
   /** A color the engine cannot evaluate; text drawn with it was kept. */
   | 'unsupported-color'
-  /** Generated content the engine does not render as text: counters and images. */
+  /** Generated content the engine does not render as text: counters, images, and text beyond 1,000,000 characters per document. */
   | 'unsupported-content'
   /** The document nests deeper than any real page; nothing was extracted. */
   | 'document-too-deep';

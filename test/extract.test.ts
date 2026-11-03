@@ -191,6 +191,29 @@ describe('extractVisible', () => {
     );
   });
 
+  it('reports generated text that exists only under an undecidable condition', () => {
+    const result = extractVisible(
+      documentOf(
+        '<style>@container (width > 0) { p::before { content: "maybe " } }</style><p>x</p>',
+      ),
+    );
+    expect(result.text).toBe('x');
+    expect(result.hidden.map(({ text, selector }) => ({ text, selector }))).toEqual([
+      { text: 'maybe', selector: 'html > body > p::before' },
+    ]);
+  });
+
+  it('caps how much text generated content may add', () => {
+    const result = extractVisible(
+      documentOf(
+        `<style>*::before { content: "${'A'.repeat(5000)}" }</style>${'<div></div>'.repeat(300)}`,
+      ),
+    );
+    const generated = result.generated.reduce((total, entry) => total + entry.text.length, 0);
+    expect(generated).toBeLessThanOrEqual(1_000_000);
+    expect(result.warnings.map((warning) => warning.code)).toContain('unsupported-content');
+  });
+
   it('warns about counters and images in generated content', () => {
     const result = extractVisible(
       documentOf(

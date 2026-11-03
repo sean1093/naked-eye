@@ -8,7 +8,7 @@ import { createStyleEngine, type Style, type StyleEngine, type World } from './c
 import { contrast, over, type RGBA, toHex } from './css/color.js';
 import { DepthExceededError, parseHtml } from './dom.js';
 import { assemble, type Layout, type RenderNode, type Space, type Verdict } from './render.js';
-import type { ExtractOptions, ExtractResult, HiddenReason } from './types.js';
+import type { ExtractOptions, ExtractResult, HiddenReason, Warning } from './types.js';
 import { MAY_CONTAIN_INVISIBLE } from './unicode.js';
 import { own } from './util.js';
 import {
@@ -76,7 +76,6 @@ const NO_PSEUDO: Record<string, true> = {
   canvas: true,
   col: true,
   embed: true,
-  hr: true,
   iframe: true,
   img: true,
   input: true,
@@ -87,9 +86,7 @@ const NO_PSEUDO: Record<string, true> = {
   param: true,
   progress: true,
   select: true,
-  source: true,
   textarea: true,
-  track: true,
   video: true,
   wbr: true,
 };
@@ -311,7 +308,13 @@ function resolveLimits(options: ExtractOptions): Limits {
   return limits;
 }
 
+/** Characters `::before` and `::after` may add to a document: one rule matching every element must not multiply into gigabytes. */
+const GENERATED_LIMIT = 1_000_000;
+
 class Extractor {
+  /** Problems found while rendering, reported with the engine's warnings. */
+  readonly warnings: Warning[] = [];
+  private generatedBudget = GENERATED_LIMIT;
   private readonly selectorOf = createSelector();
   private readonly worlds: World[];
   private readonly rootClipsX: boolean;
@@ -551,7 +554,13 @@ class Extractor {
       if (style.strokeWidth * frame.scale >= MIN_STROKE) inks.push(style.strokeColor);
       for (const shadow of style.shadows)
         if (shadow.blur <= style.fontSize * MAX_SHADOW_BLUR) inks.push(shadow.color);
-      const clip = this.textClipOf(element, world);
+      // A pseudo-element's own background clipped to its text paints its glyphs.
+      const clip =
+        selector !== undefined && style.backgroundClipText
+          ? style.backgroundImage
+            ? null
+            : style.backgroundColor
+          : this.textClipOf(element, world);
       if (clip !== undefined) inks.push(clip);
     }
     if (inks.includes(null)) return null;
@@ -564,7 +573,14 @@ class Extractor {
       // Fully transparent ink is invisible over any backdrop, known or not.
       verdict = ['transparent-text', `text color ${toHex(fill)} is fully transparent`];
     } else {
-      const backdrops = this.backdropsOf(element, world);
+      let backdrops = this.backdropsOf(element, world);
+      // A pseudo-element paints its own background behind its glyphs.
+      if (selector !== undefined && backdrops !== null && style.backgroundClipText === false) {
+        const own = style.backgroundColor;
+        if (style.backgroundImage || own === null) return null;
+        if (own.a >= 1) backdrops = [own];
+        else if (own.a > 0) backdrops = backdrops.map((backdrop) => over(own, backdrop));
+      }
       if (backdrops === null) return null;
       let best = 0;
       for (const backdrop of backdrops) {
@@ -597,7 +613,14 @@ class Extractor {
     world: World,
     selector?: string,
   ): Frame {
-    if (parent.subtree !== null) return parent;
+    const { name, namespace } = element;
+    // Code and document metadata, not text: dropped without a finding, hidden or not.
+    const code =
+      name === 'script' ||
+      name === 'style' ||
+      (namespace === HTML_NAMESPACE && (name === 'head' || name === 'title'));
+    if (parent.subtree !== null)
+      return code && !parent.silent ? { ...parent, silent: true } : parent;
     const frame: Frame = { ...parent };
     const at = (reason: HiddenReason, detail: string): Verdict =>
       selector === undefined ? this.verdict(reason, element, detail) : { reason, selector, detail };
@@ -605,19 +628,10 @@ class Extractor {
       ...frame,
       subtree: at(reason, detail),
     });
-    const { name, namespace } = element;
-
     if (namespace === SVG_NAMESPACE && own(SVG_HIDDEN, name) === true)
       return hide('not-rendered', `SVG <${name}> content`);
     if (style.display.kind === 'none') {
-      // Code and document metadata, not text: dropped without a finding.
-      if (
-        name === 'script' ||
-        name === 'style' ||
-        (namespace === HTML_NAMESPACE && (name === 'head' || name === 'title'))
-      ) {
-        return { ...hide('not-rendered', `<${name}>`), silent: true };
-      }
+      if (code) return { ...hide('not-rendered', `<${name}>`), silent: true };
       if (own(NEVER_RENDERED, name) === true) return hide('not-rendered', `<${name}> content`);
       if (element.attribs.hidden !== undefined) return hide('display-none', 'hidden attribute');
       if (element.name === 'dialog') return hide('display-none', 'closed <dialog>');
@@ -866,7 +880,12 @@ class Extractor {
     }
 
     // Without layout, a block's first formatted line may hold all of its text.
-    const container = first.subtree === null && isBlockContainer(style, scope.flexItem);
+    const container =
+      first.subtree === null &&
+      isBlockContainer(
+        style,
+        scope.flexItem || style.position === 'absolute' || style.position === 'fixed',
+      );
     const line = container ? this.startVerdict(element, ownFrames, scope, 'first-line') : null;
     const frames =
       line === null
@@ -935,20 +954,40 @@ class Extractor {
     const styles = this.worlds.map((world) => this.engine.pseudoStyle(element, which, world));
     if (styles.every((pseudoStyle) => pseudoStyle === null)) return null;
     const selector = `${this.selectorOf(element)}::${which}`;
-    const pseudoFrames = this.worlds.map((world) => {
+    // Only fonts, colors and visibility apply to these boxes, and opacity to ::first-letter:
+    // a browser ignores display, position, margins, transforms and clipping on them.
+    const verdicts = this.worlds.map((world): Verdict | null => {
       const pseudoStyle = styles[world];
       const frame = frames[world] as Frame;
-      return pseudoStyle === null || pseudoStyle === undefined
-        ? frame
-        : this.enter(element, pseudoStyle, frame, scope, world, selector);
+      if (pseudoStyle === null || pseudoStyle === undefined) return null;
+      if (pseudoStyle.visibility !== 'visible') {
+        return {
+          reason: 'visibility-hidden',
+          selector,
+          detail: `visibility: ${pseudoStyle.visibility}`,
+        };
+      }
+      const size = pseudoStyle.fontSize * frame.scale;
+      if (size < this.limits.minFontSize)
+        return { reason: 'font-size', selector, detail: `font-size: ${px(size)}` };
+      const opacity = which === 'first-letter' ? pseudoStyle.opacity : 1;
+      if (frame.opacity * opacity < this.limits.minOpacity)
+        return { reason: 'opacity', selector, detail: `opacity: ${pseudoStyle.opacity}` };
+      const inked = { ...frame, opacity: frame.opacity * opacity };
+      return this.colorVerdict(element, pseudoStyle, inked, frame, world, selector);
     });
-    return this.textVerdict(pseudoFrames, scope);
+    const [first, second] = verdicts;
+    if (first !== null && first !== undefined) return first;
+    return second === null || second === undefined
+      ? null
+      : { ...second, detail: `${second.detail} (under a condition static mode cannot decide)` };
   }
 
   /**
-   * `::before` or `::after`, as a box holding its generated text. It exists when
-   * the first world generates it; icon-font glyphs in the Private Use Area are
-   * pictures, not text, and are dropped.
+   * `::before` or `::after`, as a box holding its generated text. Icon-font
+   * glyphs in the Private Use Area are pictures, not text, and are dropped. A
+   * world in which the box does not exist hides the text, as `display: none`
+   * in one world does.
    */
   private pseudo(
     element: Element,
@@ -957,13 +996,30 @@ class Extractor {
     scope: Scope,
   ): RenderNode | null {
     const styles = this.worlds.map((world) => this.engine.pseudoStyle(element, which, world));
-    const first = styles[0];
-    const text = first?.content?.replace(PRIVATE_USE, '') ?? '';
-    if (first === null || first === undefined || text === '') return null;
+    const generates = (style: Style | null | undefined): style is Style =>
+      style !== null &&
+      style !== undefined &&
+      (style.content?.replace(PRIVATE_USE, '') ?? '') !== '';
+    const first = styles.find(generates);
+    if (first === undefined) return null;
+    const text = (first.content as string).replace(PRIVATE_USE, '');
+    if (text.length > this.generatedBudget) {
+      this.warnings.push({
+        code: 'unsupported-content',
+        message: `Generated content beyond ${GENERATED_LIMIT} characters was not rendered`,
+      });
+      this.generatedBudget = 0;
+      return null;
+    }
+    this.generatedBudget -= text.length;
     const selector = `${this.selectorOf(element)}::${which}`;
-    const pseudoFrames = this.worlds.map((world) =>
-      this.enter(element, styles[world] ?? first, frames[world] as Frame, scope, world, selector),
-    );
+    const pseudoFrames = this.worlds.map((world) => {
+      const style = styles[world];
+      const frame = frames[world] as Frame;
+      if (generates(style)) return this.enter(element, style, frame, scope, world, selector);
+      const missing: Verdict = { reason: 'not-rendered', selector, detail: 'content: none' };
+      return frame.subtree === null ? { ...frame, subtree: missing } : frame;
+    });
     const subtree = (pseudoFrames[0] as Frame).subtree;
     const layout =
       subtree !== null && BOXLESS[subtree.reason] === true
@@ -1053,5 +1109,5 @@ export function extractVisible(html: string, options: ExtractOptions = {}): Extr
     null,
   );
   const { text, hidden, generated } = assemble(tree);
-  return { text, hidden, generated, warnings: [...engine.warnings] };
+  return { text, hidden, generated, warnings: [...engine.warnings, ...extractor.warnings] };
 }

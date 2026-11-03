@@ -72,9 +72,14 @@ function attrValue(
   if (nameToken?.[0] !== TokenType.Ident) return null;
   const raw = ctx.attribute((nameToken[4].value as string).toLowerCase());
   const typeNode = parts[1];
-  if (raw === undefined) return fallback(rest, ctx, depth);
+  const untyped = typeNode === undefined || identOf(typeNode) === 'raw-string';
+  // A missing attribute is the empty string for an untyped attr() with no fallback.
+  if (raw === undefined)
+    return untyped && rest === null
+      ? parseListOfComponentValues(tokenize({ css: '""' }))
+      : fallback(rest, ctx, depth);
 
-  if (typeNode === undefined || identOf(typeNode) === 'raw-string') {
+  if (untyped) {
     const quoted = `"${raw.replace(/["\\\n]/g, (character) => `\\${character === '\n' ? 'a ' : character}`)}"`;
     return parseListOfComponentValues(tokenize({ css: quoted }));
   }

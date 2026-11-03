@@ -99,6 +99,8 @@ export interface Values {
   /** The `perspective` property: the distance children's 3D transforms are viewed from. */
   perspective: Expr | 'none';
   content: 'normal' | 'none' | ContentItem[];
+  /** The marks `open-quote` and `close-quote` draw: pairs from the outermost level, or none. */
+  quotes: 'auto' | 'none' | [string, string][];
   color: Color;
   'background-color': Color;
   /** Whether any background layer paints an image (a gradient that is fully transparent does not). */
@@ -1103,6 +1105,7 @@ export const LONGHANDS: Definitions = {
         : lengthPercentage(single(nodes) ?? undefined, false, true),
   },
   content: { inherited: false, initial: 'normal', parse: parseContent },
+  quotes: { inherited: true, initial: 'auto', parse: parseQuotes },
   color: {
     inherited: true,
     initial: { kind: 'scheme', light: rgba(0, 0, 0), dark: rgba(1, 1, 1) },
@@ -1178,21 +1181,36 @@ function parseIntrinsicSize(nodes: ComponentValue[]): boolean | null {
   return lengthPercentage(lengths[0], false, true) === null ? null : true;
 }
 
-const CONTENT_FUNCTIONS = [
-  'counter',
-  'counters',
-  'url',
-  'image',
-  'image-set',
-  'cross-fade',
-  'element',
-  'leader',
-  'target-counter',
-  'target-counters',
-  'target-text',
-  'content',
-  'string',
-];
+const CONTENT_FUNCTIONS: Record<string, true> = {
+  counter: true,
+  counters: true,
+  url: true,
+  image: true,
+  'image-set': true,
+  'cross-fade': true,
+  element: true,
+  leader: true,
+  'target-counter': true,
+  'target-counters': true,
+  'target-text': true,
+  content: true,
+  string: true,
+};
+
+/** `quotes`: `auto`, `none`, or pairs of strings, one pair per nesting level. */
+function parseQuotes(nodes: ComponentValue[]): Values['quotes'] | null {
+  const word = identOf(single(nodes) ?? undefined);
+  if (word === 'auto' || word === 'none') return word;
+  const strings = nodes.map((node) => tokenOf(node));
+  if (strings.length === 0 || strings.length % 2 !== 0) return null;
+  const pairs: [string, string][] = [];
+  for (let index = 0; index < strings.length; index += 2) {
+    const [open, close] = [strings[index], strings[index + 1]];
+    if (open?.[0] !== TokenType.String || close?.[0] !== TokenType.String) return null;
+    pairs.push([open[4].value as string, close[4].value as string]);
+  }
+  return pairs;
+}
 
 /**
  * `content` for `::before` and `::after`. Only what precedes `/` renders: the
@@ -1217,7 +1235,7 @@ function parseContent(nodes: ComponentValue[]): Values['content'] | null {
     else if (token?.[0] === TokenType.URL) items.push({ kind: 'unsupported', what: 'An image' });
     else if (
       isFunctionNode(node) &&
-      (CONTENT_FUNCTIONS.includes(node.getName().toLowerCase()) ||
+      (CONTENT_FUNCTIONS[node.getName().toLowerCase()] === true ||
         node.getName().toLowerCase().endsWith('gradient'))
     ) {
       const name = node.getName().toLowerCase();

@@ -131,6 +131,7 @@ export interface Style {
   perspective: number | null;
   /** The text `content` generates on `::before` and `::after`; `null` when it generates no box. */
   content: string | null;
+  quotes: Values['quotes'];
   /** The used color scheme. */
   colorScheme: Scheme;
   colorSchemeSpec: Values['color-scheme'];
@@ -361,6 +362,7 @@ const INITIAL_STYLE: Style = {
   paddingLeft: 0,
   perspective: null,
   content: null,
+  quotes: 'auto',
   colorScheme: 'light',
   colorSchemeSpec: 'normal',
   color: { r: 0, g: 0, b: 0, a: 1 },
@@ -1196,6 +1198,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     }
     const known = cache.get(element);
     if (known !== undefined) return known;
+    if (pseudoIndex[which].size === 0) return null;
     const matched = pseudoMatches(element, which);
     const computed =
       matched.length === 0
@@ -1213,12 +1216,19 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
   };
 
   /** The text a `content` value generates; counters and images are reported, not rendered. */
-  const resolveContent = (content: Values['content'], element: Element): string | null => {
+  const resolveContent = (
+    content: Values['content'],
+    element: Element,
+    quotes: Values['quotes'],
+  ): string | null => {
     if (content === 'none' || content === 'normal') return null;
     const parts: string[] = [];
+    // Only the outermost level of quotes is modelled; nesting depth is not tracked.
+    const pair =
+      quotes === 'auto' ? ['\u201C', '\u201D'] : quotes === 'none' ? ['', ''] : quotes[0];
     for (const item of content) {
       if (item.kind === 'string') parts.push(item.value);
-      else if (item.kind === 'quote') parts.push(item.open ? '\u201C' : '\u201D');
+      else if (item.kind === 'quote') parts.push((item.open ? pair?.[0] : pair?.[1]) ?? '');
       else if (item.kind === 'unsupported') {
         warn(
           'unsupported-content',
@@ -1310,6 +1320,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     style.visibility = plain('visibility', parentStyle.visibility, 'visible');
     style.contentVisibility = plain('content-visibility', parentStyle.contentVisibility, 'visible');
     style.position = plain('position', parentStyle.position, 'static');
+    style.quotes = plain('quotes', parentStyle.quotes, 'auto');
     style.whiteSpaceCollapse = plain(
       'white-space-collapse',
       parentStyle.whiteSpaceCollapse,
@@ -1562,7 +1573,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
     if (pseudo) {
       const content = specified('content');
-      style.content = typeof content === 'string' ? null : resolveContent(content, element);
+      style.content =
+        typeof content === 'string' ? null : resolveContent(content, element, style.quotes);
     }
     return { style, custom };
   };
