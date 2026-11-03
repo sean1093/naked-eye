@@ -42,6 +42,7 @@
     "typecheck": "tsc --noEmit",
     "check:exports": "attw --pack . && publint",
     "size": "size-limit",
+    "check:docs": "node scripts/check-docs.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

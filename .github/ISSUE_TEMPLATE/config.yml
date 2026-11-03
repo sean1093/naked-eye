@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/sean1093/naked-eye/discussions
+    about: Ask how to do something, or propose an idea before writing it up as a request.
+  - name: Report a vulnerability or a bypass
+    url: https://github.com/sean1093/naked-eye/security/policy
+    about: Hidden text that reaches the output is a vulnerability. Read the security policy and report privately.
