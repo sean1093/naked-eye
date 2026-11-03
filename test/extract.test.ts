@@ -141,6 +141,7 @@ describe('extractVisible', () => {
     expect(result).toEqual({
       text: '',
       hidden: [],
+      generated: [],
       warnings: [
         { code: 'document-too-deep', message: 'The document nests elements more than 1024 deep.' },
       ],
@@ -161,6 +162,7 @@ describe('extractVisible', () => {
     expect(extractVisible(documentOf('<p>co&shy;operate</p>'))).toEqual({
       text: 'cooperate',
       hidden: [],
+      generated: [],
       warnings: [],
     });
   });
@@ -189,6 +191,32 @@ describe('extractVisible', () => {
     );
     expect(result.text).toBe('\u0645\u06CC\u200C\u0631\u0648\u0645\n\n\u0915\u094D\u200D\u0937');
     expect(result.hidden).toEqual([]);
+  });
+
+  it('lists the text CSS generates, with its pseudo-element', () => {
+    const result = extractVisible(
+      documentOf(
+        '<style>#total::before { content: "Total: " } #total::after { content: "\\200B" }</style><p id="total">9</p>',
+      ),
+    );
+    expect(result.text).toBe('Total: 9');
+    expect(result.generated).toEqual([{ text: 'Total:', selector: '#total::before' }]);
+    expect(result.hidden.map(({ text, reason, selector }) => ({ text, reason, selector }))).toEqual(
+      [{ text: 'U+200B', reason: 'invisible-unicode', selector: '#total::after' }],
+    );
+  });
+
+  it('warns about counters and images in generated content', () => {
+    const result = extractVisible(
+      documentOf(
+        '<style>li::before { content: counter(item) ". " url(dot.png) }</style><ol><li>first</li></ol>',
+      ),
+    );
+    expect(result.text).toBe('. first');
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      'unsupported-content',
+      'unsupported-content',
+    ]);
   });
 
   it('handles fragments and empty input', () => {

@@ -622,6 +622,28 @@ export const cases: Case[] = [
     hidden: [['invisible-unicode', 'run rm -rf']],
   },
 
+  // CSS generated content: on screen, not in the DOM.
+  {
+    name: 'generated text is part of what a human sees',
+    html: '<style>.price::before { content: "$" } .price::after { content: " USD" } a::after { content: " (" attr(href) ")" }</style><p class="price">42</p><a href="https://evil.example/pay">pay here</a>',
+    visible: '$42 USD\n\npay here (https://evil.example/pay)',
+  },
+  {
+    name: 'pseudo-elements that generate nothing',
+    html: '<style>p::before { content: none } p::after { content: normal } i::before { content: "\\f101" }</style><p>plain</p><i>icon</i>',
+    visible: 'plain\n\nicon',
+  },
+  {
+    name: 'hidden generated text',
+    html: '<style>.a::before { content: "secret "; font-size: 0 } .b::after { content: " hidden"; display: none } .c::before { content: "faded "; opacity: 0 }</style><p class="a">x</p><p class="b">y</p><p class="c">z</p>',
+    visible: 'x\n\ny\n\nz',
+    hidden: [
+      ['font-size', 'secret'],
+      ['display-none', 'hidden'],
+      ['opacity', 'faded'],
+    ],
+  },
+
   // The cascade is followed wherever it leads.
   {
     name: 'hiding reached through a layer, nesting and a custom property',

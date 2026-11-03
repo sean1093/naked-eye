@@ -98,6 +98,7 @@ export interface Values {
   'padding-left': Expr;
   /** The `perspective` property: the distance children's 3D transforms are viewed from. */
   perspective: Expr | 'none';
+  content: 'normal' | 'none' | ContentItem[];
   color: Color;
   'background-color': Color;
   /** Whether any background layer paints an image (a gradient that is fully transparent does not). */
@@ -119,6 +120,12 @@ export interface Values {
 }
 
 export type Paint = Color | 'none' | 'other';
+
+export type ContentItem =
+  | { kind: 'string'; value: string }
+  | { kind: 'quote'; open: boolean }
+  | { kind: 'no-quote' }
+  | { kind: 'unsupported'; what: string };
 
 export type Longhand = keyof Values;
 
@@ -1095,6 +1102,7 @@ export const LONGHANDS: Definitions = {
         ? 'none'
         : lengthPercentage(single(nodes) ?? undefined, false, true),
   },
+  content: { inherited: false, initial: 'normal', parse: parseContent },
   color: {
     inherited: true,
     initial: { kind: 'scheme', light: rgba(0, 0, 0), dark: rgba(1, 1, 1) },
@@ -1168,6 +1176,62 @@ function parseIntrinsicSize(nodes: ComponentValue[]): boolean | null {
   const lengths = nodes.filter((node) => identOf(node) !== 'auto');
   if (lengths.length !== 1 || nodes.length - lengths.length > 1) return null;
   return lengthPercentage(lengths[0], false, true) === null ? null : true;
+}
+
+const CONTENT_FUNCTIONS = [
+  'counter',
+  'counters',
+  'url',
+  'image',
+  'image-set',
+  'cross-fade',
+  'element',
+  'leader',
+  'target-counter',
+  'target-counters',
+  'target-text',
+  'content',
+  'string',
+];
+
+/**
+ * `content` for `::before` and `::after`. Only what precedes `/` renders: the
+ * rest is alternative text. `attr()` is substituted before this runs.
+ */
+function parseContent(nodes: ComponentValue[]): Values['content'] | null {
+  const word = identOf(single(nodes) ?? undefined);
+  if (word === 'normal' || word === 'none') return word;
+  const slash = nodes.findIndex((node) => isToken(node, TokenType.Delim) && stringOf(node) === '/');
+  const shown = slash === -1 ? nodes : nodes.slice(0, slash);
+  if (shown.length === 0) return null;
+  const items: ContentItem[] = [];
+  for (const node of shown) {
+    const token = tokenOf(node);
+    const ident = identOf(node);
+    if (token?.[0] === TokenType.String)
+      items.push({ kind: 'string', value: token[4].value as string });
+    else if (ident === 'open-quote' || ident === 'close-quote')
+      items.push({ kind: 'quote', open: ident === 'open-quote' });
+    else if (ident === 'no-open-quote' || ident === 'no-close-quote')
+      items.push({ kind: 'no-quote' });
+    else if (token?.[0] === TokenType.URL) items.push({ kind: 'unsupported', what: 'An image' });
+    else if (
+      isFunctionNode(node) &&
+      (CONTENT_FUNCTIONS.includes(node.getName().toLowerCase()) ||
+        node.getName().toLowerCase().endsWith('gradient'))
+    ) {
+      const name = node.getName().toLowerCase();
+      items.push({
+        kind: 'unsupported',
+        what: name.startsWith('counter')
+          ? 'A counter'
+          : name === 'url' || name.includes('image') || name.endsWith('gradient')
+            ? 'An image'
+            : `${name}()`,
+      });
+    } else return null;
+  }
+  return items;
 }
 
 /** Properties whose unitless lengths are px in quirks mode. */

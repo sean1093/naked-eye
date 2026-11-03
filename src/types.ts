@@ -48,6 +48,8 @@ export type WarningCode =
   | 'unknown-condition'
   /** A color the engine cannot evaluate; text drawn with it was kept. */
   | 'unsupported-color'
+  /** Generated content the engine does not render as text: counters and images. */
+  | 'unsupported-content'
   /** The document nests deeper than any real page; nothing was extracted. */
   | 'document-too-deep';
 
@@ -56,11 +58,20 @@ export interface Warning {
   message: string;
 }
 
+/** Text that CSS puts on screen although it is not in the DOM. */
+export interface GeneratedText {
+  text: string;
+  /** The pseudo-element, for example `#price::before`. */
+  selector: string;
+}
+
 export interface ExtractResult {
   /** The text a human would see, with block boundaries as line breaks. */
   text: string;
   /** Everything that was removed, in document order. */
   hidden: HiddenText[];
+  /** Text included in `text` that CSS generates rather than the DOM holds, in document order. */
+  generated: GeneratedText[];
   warnings: Warning[];
 }
 

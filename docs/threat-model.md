@@ -184,7 +184,9 @@ The opposite gap also exists: text a human sees that is not in the DOM. CSS
 DOM-only extractor never sees, so the model and the human disagree about what
 the page says. `naked-eye` renders generated content into `text` at its
 position, subject to the same hiding rules, and lists each insertion in
-`generated` ([#8][i8]).
+`generated` ([#8][i8]). Strings, `attr()` and quotes are rendered; counters and
+images are reported in `warnings`; icon-font glyphs in the Private Use Area are
+pictures, not text, and are dropped. List markers (`::marker`) are not read.
 
 ## Non-goals
 

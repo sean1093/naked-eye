@@ -67,6 +67,36 @@ const SVG_HIDDEN: Record<string, true> = {
   title: true,
 };
 
+/** Elements without a content box, which generate no `::before` or `::after`. */
+const NO_PSEUDO: Record<string, true> = {
+  area: true,
+  audio: true,
+  base: true,
+  br: true,
+  canvas: true,
+  col: true,
+  embed: true,
+  hr: true,
+  iframe: true,
+  img: true,
+  input: true,
+  link: true,
+  meta: true,
+  meter: true,
+  object: true,
+  param: true,
+  progress: true,
+  select: true,
+  source: true,
+  textarea: true,
+  track: true,
+  video: true,
+  wbr: true,
+};
+
+/** Private Use Area code points: icon-font glyphs, pictures rather than text. */
+const PRIVATE_USE = /[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/gu;
+
 /** SVG text content elements: text inside them is painted. */
 const SVG_TEXT: Record<string, true> = { text: true, tspan: true, textPath: true };
 
@@ -443,6 +473,7 @@ class Extractor {
     frame: Frame,
     parent: Frame,
     world: World,
+    selector: string | undefined,
   ): Verdict | null {
     const inks: (RGBA | null)[] = [];
     const withAlpha = (ink: RGBA | null, alpha: number): RGBA | null =>
@@ -485,16 +516,31 @@ class Extractor {
     }
     const [reason, detail] = verdict;
     if (parent.color?.reason === reason && parent.color.detail === detail) return parent.color;
-    return this.verdict(reason, element, detail);
+    return selector === undefined
+      ? this.verdict(reason, element, detail)
+      : { reason, selector, detail };
   }
 
-  /** The frame an element passes to its content, in one world. */
-  private enter(element: Element, style: Style, parent: Frame, scope: Scope, world: World): Frame {
+  /**
+   * The frame an element passes to its content, in one world. For a
+   * pseudo-element, `element` is its originating element and `selector` names
+   * the pseudo-element in findings.
+   */
+  private enter(
+    element: Element,
+    style: Style,
+    parent: Frame,
+    scope: Scope,
+    world: World,
+    selector?: string,
+  ): Frame {
     if (parent.subtree !== null) return parent;
     const frame: Frame = { ...parent };
+    const at = (reason: HiddenReason, detail: string): Verdict =>
+      selector === undefined ? this.verdict(reason, element, detail) : { reason, selector, detail };
     const hide = (reason: HiddenReason, detail: string): Frame => ({
       ...frame,
-      subtree: this.verdict(reason, element, detail),
+      subtree: at(reason, detail),
     });
     const { name, namespace } = element;
 
@@ -519,8 +565,7 @@ class Extractor {
 
     if (style.visibility !== 'visible') {
       frame.visibility =
-        parent.visibility ??
-        this.verdict('visibility-hidden', element, `visibility: ${style.visibility}`);
+        parent.visibility ?? at('visibility-hidden', `visibility: ${style.visibility}`);
     } else {
       frame.visibility = null;
     }
@@ -600,7 +645,7 @@ class Extractor {
           Math.abs(value) >= limit
             ? `${name}${name.includes(':') ? '' : ':'} ${px(name === 'right' || name === 'bottom' ? -value : value)}`
             : `moved ${px(frame.shiftX)}, ${px(frame.shiftY)} with its ancestors`;
-        frame.offscreen = parent.offscreen ?? this.verdict('off-screen', element, detail);
+        frame.offscreen = parent.offscreen ?? at('off-screen', detail);
       } else {
         frame.offscreen = null;
       }
@@ -617,7 +662,7 @@ class Extractor {
     const size = style.fontSize * frame.scale;
     frame.font =
       size < this.limits.minFontSize
-        ? (parent.font ?? this.verdict('font-size', element, `font-size: ${px(size)}`))
+        ? (parent.font ?? at('font-size', `font-size: ${px(size)}`))
         : null;
 
     const blockContainer =
@@ -632,10 +677,10 @@ class Extractor {
       // A large positive indent is out of reach only when the root clips horizontally.
       frame.indent =
         indent !== null && (indent <= -limit || (this.rootClipsX && indent >= limit))
-          ? this.verdict('off-screen', element, `text-indent: ${px(indent)}`)
+          ? at('off-screen', `text-indent: ${px(indent)}`)
           : null;
     }
-    frame.color = this.colorVerdict(element, style, frame, parent, world);
+    frame.color = this.colorVerdict(element, style, frame, parent, world, selector);
     return frame;
   }
 
@@ -793,7 +838,54 @@ class Extractor {
     } else {
       children = this.build(element.children, frames, inner, style);
     }
+    if (!boxless && element.namespace === HTML_NAMESPACE && own(NO_PSEUDO, element.name) !== true) {
+      const before = this.pseudo(element, 'before', frames, inner);
+      const after = this.pseudo(element, 'after', frames, inner);
+      if (before !== null) children.unshift(before);
+      if (after !== null) children.push(after);
+    }
     return { kind: 'box', layout, children };
+  }
+
+  /**
+   * `::before` or `::after`, as a box holding its generated text. It exists when
+   * the first world generates it; icon-font glyphs in the Private Use Area are
+   * pictures, not text, and are dropped.
+   */
+  private pseudo(
+    element: Element,
+    which: 'before' | 'after',
+    frames: Frame[],
+    scope: Scope,
+  ): RenderNode | null {
+    const styles = this.worlds.map((world) => this.engine.pseudoStyle(element, which, world));
+    const first = styles[0];
+    const text = first?.content?.replace(PRIVATE_USE, '') ?? '';
+    if (first === null || first === undefined || text === '') return null;
+    const selector = `${this.selectorOf(element)}::${which}`;
+    const pseudoFrames = this.worlds.map((world) =>
+      this.enter(element, styles[world] ?? first, frames[world] as Frame, scope, world, selector),
+    );
+    const subtree = (pseudoFrames[0] as Frame).subtree;
+    const layout =
+      subtree !== null && BOXLESS[subtree.reason] === true
+        ? 'inline'
+        : this.layoutOfStyle(first, scope);
+    const hidden = this.textVerdict(pseudoFrames, scope);
+    return {
+      kind: 'box',
+      layout,
+      children: [
+        {
+          kind: 'text',
+          text,
+          space: first.whiteSpaceCollapse,
+          hidden,
+          origin: selector,
+          generated: selector,
+        },
+      ],
+    };
   }
 
   private buildSelect(
@@ -838,6 +930,7 @@ export function extractVisible(html: string, options: ExtractOptions = {}): Extr
     return {
       text: '',
       hidden: [],
+      generated: [],
       warnings: [{ code: 'document-too-deep', message: error.message }],
     };
   }
@@ -861,6 +954,6 @@ export function extractVisible(html: string, options: ExtractOptions = {}): Extr
     { svgGraphics: null, svgText: false, flexItem: false },
     null,
   );
-  const { text, hidden } = assemble(tree);
-  return { text, hidden, warnings: [...engine.warnings] };
+  const { text, hidden, generated } = assemble(tree);
+  return { text, hidden, generated, warnings: [...engine.warnings] };
 }

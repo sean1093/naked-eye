@@ -126,6 +126,8 @@ export interface Style {
   paddingLeft: Length;
   /** The `perspective` distance in px for children's 3D transforms, or `null`. */
   perspective: number | null;
+  /** The text `content` generates on `::before` and `::after`; `null` when it generates no box. */
+  content: string | null;
   /** The used color scheme. */
   colorScheme: Scheme;
   colorSchemeSpec: Values['color-scheme'];
@@ -161,6 +163,8 @@ export interface StyleEngine {
   readonly warnings: readonly Warning[];
   readonly quirks: boolean;
   style(element: Element, world: World): Style;
+  /** The styles of `::before` or `::after`, or `null` when no rule targets it. */
+  pseudoStyle(element: Element, which: 'before' | 'after', world: World): Style | null;
   /** A length context for resolving lengths against an element's styles. */
   context(element: Element, world: World): Context;
 }
@@ -353,6 +357,7 @@ const INITIAL_STYLE: Style = {
   paddingBottom: 0,
   paddingLeft: 0,
   perspective: null,
+  content: null,
   colorScheme: 'light',
   colorSchemeSpec: 'normal',
   color: { r: 0, g: 0, b: 0, a: 1 },
@@ -396,6 +401,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   const root = new Layer(null);
   const index = new Map<string, Entry[]>();
+  const pseudoIndex = { before: new Map<string, Entry[]>(), after: new Map<string, Entry[]>() };
   const keyframes = new Map<string, Defined<Keyframe[]>[]>();
   const registered = new Map<string, Defined<Registration>[]>();
   const parsedSheets = new Map<string, Rule[]>();
@@ -450,9 +456,16 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       origin: ctx.origin,
     };
     for (const selector of selectors) {
-      if (selector.pseudoElement !== null) continue;
-      const list = index.get(selector.bucket);
-      if (list === undefined) index.set(selector.bucket, [{ block, selector }]);
+      const { pseudoElement } = selector;
+      const target =
+        pseudoElement === null
+          ? index
+          : pseudoElement === 'before' || pseudoElement === 'after'
+            ? pseudoIndex[pseudoElement]
+            : null;
+      if (target === null) continue;
+      const list = target.get(selector.bucket);
+      if (list === undefined) target.set(selector.bucket, [{ block, selector }]);
       else list.push({ block, selector });
     }
   };
@@ -849,9 +862,11 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   // Per-element matching is shared by both worlds.
   const matchCache = new Map<Element, { block: Block; specificity: Specificity }[]>();
-  const matches = (element: Element): { block: Block; specificity: Specificity }[] => {
-    const cached = matchCache.get(element);
-    if (cached !== undefined) return cached;
+  /** Rules from one index whose selector matches, each at its most specific matching selector. */
+  const lookup = (
+    element: Element,
+    entries: Map<string, Entry[]>,
+  ): { block: Block; specificity: Specificity }[] => {
     const found = new Map<Block, Specificity>();
     const keys = [element.name.toLowerCase(), '*'];
     const id = element.attribs.id;
@@ -859,14 +874,26 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     for (const name of (element.attribs.class ?? '').split(/[\t\n\f\r ]+/))
       if (name !== '') keys.push(`.${name}`);
     for (const key of new Set(keys)) {
-      for (const { block, selector } of index.get(key) ?? []) {
+      for (const { block, selector } of entries.get(key) ?? []) {
         const previous = found.get(block);
         if (previous !== undefined && compareSpecificity(previous, selector.specificity) >= 0)
           continue;
         if (selector.test(element)) found.set(block, selector.specificity);
       }
     }
-    const list = [...found].map(([block, specificity]) => ({ block, specificity }));
+    return [...found].map(([block, specificity]) => ({ block, specificity }));
+  };
+
+  const pseudoMatches = (
+    element: Element,
+    which: 'before' | 'after',
+  ): { block: Block; specificity: Specificity }[] =>
+    pseudoIndex[which].size === 0 ? [] : lookup(element, pseudoIndex[which]);
+
+  const matches = (element: Element): { block: Block; specificity: Specificity }[] => {
+    const cached = matchCache.get(element);
+    if (cached !== undefined) return cached;
+    const list = lookup(element, index);
     const hints = presentationalHints(element);
     if (hints.length > 0) {
       list.push({
@@ -1145,8 +1172,66 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     if (known !== undefined) return known;
     const parentElement = parentOf(element);
     const parent = parentElement === null ? null : compute(parentElement, world);
+    const computed = computeStyle(element, parent, matches(element), world, parentElement === null);
+    cache.set(element, computed);
+    return computed;
+  };
+
+  const pseudoCache = new Map<string, Map<Element, Computed | null>>();
+  /** The styles of `::before` or `::after`, which inherit from their element. */
+  const computePseudo = (
+    element: Element,
+    which: 'before' | 'after',
+    world: World,
+  ): Computed | null => {
+    const key = `${which}${world}`;
+    let cache = pseudoCache.get(key);
+    if (cache === undefined) {
+      cache = new Map();
+      pseudoCache.set(key, cache);
+    }
+    const known = cache.get(element);
+    if (known !== undefined) return known;
+    const matched = pseudoMatches(element, which);
+    const computed =
+      matched.length === 0
+        ? null
+        : computeStyle(element, compute(element, world), matched, world, false, true);
+    cache.set(element, computed);
+    return computed;
+  };
+
+  /** The text a `content` value generates; counters and images are reported, not rendered. */
+  const resolveContent = (content: Values['content'], element: Element): string | null => {
+    if (content === 'none' || content === 'normal') return null;
+    const parts: string[] = [];
+    for (const item of content) {
+      if (item.kind === 'string') parts.push(item.value);
+      else if (item.kind === 'quote') parts.push(item.open ? '\u201C' : '\u201D');
+      else if (item.kind === 'unsupported') {
+        warn(
+          'unsupported-content',
+          `${item.what} in ::before or ::after content of <${element.name}> was not rendered`,
+        );
+      }
+    }
+    return parts.join('');
+  };
+
+  /**
+   * Computes one style from matched rules and the parent's computed values.
+   * `element` is the originating element, whose attributes `attr()` reads.
+   */
+  const computeStyle = (
+    element: Element,
+    parent: Computed | null,
+    matched: { block: Block; specificity: Specificity }[],
+    world: World,
+    isRoot: boolean,
+    pseudo = false,
+  ): Computed => {
     const parentStyle = parent?.style ?? INITIAL_STYLE;
-    const byProperty = candidatesFor(matches(element), world);
+    const byProperty = candidatesFor(matched, world);
     const custom = computeCustom(element, byProperty, parent?.custom ?? null, world);
 
     for (const animation of animationBlocks(element, byProperty, custom, world)) {
@@ -1181,7 +1266,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     else {
       const px = resolveLength(font.expr, {
         em: parentStyle.fontSize,
-        rem: parentElement === null ? 16 : rootFontSize[world],
+        rem: isRoot ? 16 : rootFontSize[world],
         viewportWidth: environment.width,
         viewportHeight: environment.height,
         percent: 'length',
@@ -1190,7 +1275,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       });
       style.fontSize = typeof px === 'number' ? Math.max(0, px) : parentStyle.fontSize;
     }
-    if (parentElement === null) rootFontSize[world] = style.fontSize;
+    if (isRoot) rootFontSize[world] = style.fontSize;
     const ctx = lengthContext(element, style, world);
 
     const length = (value: Offset | Size | Expr, inherited: Length): Length => {
@@ -1391,8 +1476,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     const color = specified('color');
     // The root has nothing to inherit from: its initial color, CanvasText, follows its own scheme.
     if (color === 'inherit') {
-      style.color =
-        parentElement === null ? resolve(LONGHANDS.color.initial, null) : parentStyle.color;
+      style.color = isRoot ? resolve(LONGHANDS.color.initial, null) : parentStyle.color;
     } else if (color === 'initial') style.color = resolve(LONGHANDS.color.initial, null);
     else
       style.color =
@@ -1465,9 +1549,11 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       style.svgStrokeWidth = typeof width === 'number' ? Math.max(0, width) : 1;
     }
 
-    const computed: Computed = { style, custom };
-    cache.set(element, computed);
-    return computed;
+    if (pseudo) {
+      const content = specified('content');
+      style.content = typeof content === 'string' ? null : resolveContent(content, element);
+    }
+    return { style, custom };
   };
 
   // Compute in tree order, iteratively, so that deep documents cannot overflow the stack.
@@ -1485,6 +1571,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     warnings,
     quirks,
     style: (element, world) => compute(element, conditionalRules ? world : 0).style,
+    pseudoStyle: (element, which, world) =>
+      computePseudo(element, which, conditionalRules ? world : 0)?.style ?? null,
     context: (element, world) =>
       lengthContext(element, compute(element, conditionalRules ? world : 0).style, world),
   };
