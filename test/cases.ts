@@ -21,6 +21,25 @@ const selectors = (text: string): string =>
     String.fromCodePoint(byte < 16 ? 0xfe00 + byte : 0xe0100 + byte - 16),
   ).join('');
 
+/** Where an expectation differs: one extraction mode, or one browser engine. */
+export type Where = 'browser' | 'chromium' | 'firefox' | 'webkit';
+
+/**
+ * An expectation that one mode or one engine genuinely does not meet, with
+ * what it produces instead and why the difference is real. A case is never
+ * skipped: the alternative is asserted exactly as strictly as the main one,
+ * and the most specific entry wins (the engine's over `browser`).
+ */
+export interface Divergence {
+  where: Where;
+  /** The `text` that mode or engine produces instead of `visible`. */
+  visible: string;
+  /** Findings that must be present; it replaces the case's `hidden` entirely. */
+  hidden?: [HiddenReason, string][];
+  /** Why the difference is real, in one line. */
+  reason: string;
+}
+
 export interface Case {
   name: string;
   /** Body content, or a whole document when it starts with `<!doctype`. */
@@ -29,6 +48,7 @@ export interface Case {
   visible: string;
   /** Findings that must be present: `[reason, text]`. */
   hidden?: [HiddenReason, string][];
+  diverges?: Divergence[];
 }
 
 export const cases: Case[] = [
@@ -146,6 +166,19 @@ export const cases: Case[] = [
     hidden: [
       ['not-rendered', 'tip'],
       ['not-rendered', 'loose'],
+    ],
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'painted',
+        hidden: [
+          ['not-rendered', 'tip'],
+          ['not-rendered', 'loose'],
+          ['clipped', 'html'],
+        ],
+        reason:
+          'A <foreignObject> without width or height is zero-sized and clips its content, so no engine paints the HTML inside it; static mode has no layout to see that.',
+      },
     ],
   },
   {
@@ -268,6 +301,15 @@ export const cases: Case[] = [
     name: 'transforms that keep text readable',
     html: '<p style="transform: rotate(180deg) skewX(10deg)">turned</p><p style="transform: scale(-1)">mirrored</p><p style="transform: translate(10px, 10px) scaleX(1.5)">moved</p>',
     visible: 'turned\n\nmirrored\n\nmoved',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'turned\n\nmirrored',
+        hidden: [['off-screen', 'moved']],
+        reason:
+          'scaleX(1.5) about the centre of a full-width block starts the line at about -298px, which no engine paints and nothing can scroll to; static mode cannot know the block is full width.',
+      },
+    ],
   },
   {
     name: 'transforms do not apply to inline boxes',
@@ -384,6 +426,20 @@ export const cases: Case[] = [
       ['font-size', 'b'],
       ['font-size', 'c'],
     ],
+    diverges: [
+      {
+        where: 'browser',
+        visible: '',
+        hidden: [
+          ['font-size', 'a'],
+          ['font-size', 'b'],
+          ['font-size', 'c'],
+          ['off-screen', 'kept'],
+        ],
+        reason:
+          'Rotating a full-width block by 45 degrees about its centre carries the start of the line above the top edge, where nothing is painted and no scrolling reaches; static mode cannot know the block is full width.',
+      },
+    ],
   },
   {
     name: 'a large positive indent on a page that clips horizontally',
@@ -410,6 +466,134 @@ export const cases: Case[] = [
     name: 'preserve-spaces collapses line breaks into spaces',
     html: '<div style="white-space-collapse: preserve-spaces">a  b\nc</div>',
     visible: 'a  b c',
+    diverges: [
+      {
+        where: 'chromium',
+        visible: 'a b c',
+        reason:
+          'Chromium does not implement the preserve-spaces value, so the declaration is invalid and white space collapses.',
+      },
+      {
+        where: 'webkit',
+        visible: 'a b c',
+        reason:
+          'WebKit does not implement the preserve-spaces value, so the declaration is invalid and white space collapses.',
+      },
+    ],
+  },
+  {
+    name: 'text pushed out of a box that cuts its overflow off',
+    html: '<div style="height: 20px; line-height: 40px; overflow: hidden"><p style="margin: 0">first line</p><p style="margin: 0">out of sight</p></div>',
+    visible: 'first line\n\nout of sight',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'first line',
+        hidden: [['clipped', 'out of sight']],
+        reason:
+          'Only layout says where the second line lands, so static mode cannot see that the box cuts it off; this is what browser mode adds.',
+      },
+    ],
+  },
+  {
+    name: 'a same-origin frame',
+    html: '<p>outside</p><iframe srcdoc="<p>inside the frame</p>" width="300" height="100"></iframe>',
+    visible: 'outside',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'outside\n\ninside the frame',
+        reason:
+          'Browser mode reads the document of a same-origin frame; for static mode srcdoc is an attribute, and attributes are not extracted.',
+      },
+    ],
+  },
+  {
+    name: 'a frame a reader cannot see',
+    html: '<p>outside</p><iframe srcdoc="<p>hidden frame</p>" style="visibility: hidden" width="300" height="100"></iframe><iframe srcdoc="<p>tiny frame</p>" style="width: 0; height: 0; border: 0"></iframe><iframe srcdoc="<p>moved frame</p>" style="position: absolute; left: -9999px" width="300" height="100"></iframe>',
+    visible: 'outside',
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'outside',
+        hidden: [
+          ['visibility-hidden', 'hidden frame'],
+          ['zero-size', 'tiny frame'],
+          ['off-screen', 'moved frame'],
+        ],
+        reason:
+          'Browser mode reads a same-origin frame, so it also has to judge the frame box itself; static mode never reads srcdoc and reports nothing.',
+      },
+    ],
+  },
+  {
+    name: 'text a scroll container has scrolled out of sight',
+    html: '<div id="strip" style="width: 120px; overflow-x: auto; white-space: nowrap"><span style="display: inline-block; width: 120px">one</span><span style="display: inline-block; width: 120px">two</span></div><script>strip.scrollLeft = 120</script>',
+    visible: 'onetwo',
+  },
+  {
+    name: 'a deferred subtree past the end of the page',
+    html: '<div style="height: 2000px"></div><div style="content-visibility: auto"><p>deferred text</p></div>',
+    visible: 'deferred text',
+  },
+  {
+    name: 'a fixed backdrop reaches text below the fold',
+    html: '<div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><div style="height: 2000px"></div><p style="color: #eee">below the fold</p>',
+    visible: 'below the fold',
+  },
+  {
+    name: 'a scrim that takes no pointer events is still a backdrop',
+    html: '<section style="position: relative"><div style="position: absolute; inset: 0; background: #111; pointer-events: none"></div><h1 style="position: relative; color: #eee">scrim title</h1></section>',
+    visible: 'scrim title',
+  },
+  {
+    name: 'a backdrop inside a shadow root',
+    html: '<div style="position: relative"><template shadowrootmode="open"><div style="position: absolute; inset: 0; background: #111"></div><p style="position: relative; color: #eee">shadow hero</p></template></div>',
+    visible: 'shadow hero',
+  },
+  {
+    name: 'a backdrop that paints nothing does not rescue text',
+    html: '<p style="color: #fff">white on white</p><div style="position: absolute; inset: 0; background: #000; opacity: 0"></div>',
+    visible: '',
+    hidden: [['low-contrast', 'white on white']],
+  },
+  {
+    name: 'a backdrop faded out by a filter or by an ancestor',
+    html: '<p style="color: #fff">filtered away</p><div style="position: absolute; inset: 0; background: #000; filter: opacity(0)"></div><p style="color: #fff">under a faded ancestor</p><div style="opacity: 0"><div style="position: absolute; inset: 0; background: #000"></div></div>',
+    visible: '',
+    hidden: [
+      ['low-contrast', 'filtered away'],
+      ['low-contrast', 'under a faded ancestor'],
+    ],
+  },
+  {
+    name: 'a faded image backdrop does not rescue text',
+    html: '<p style="color: #fff">faded image</p><div style="position: absolute; inset: 0; background: url(backdrop.png); opacity: 0.004"></div>',
+    visible: '',
+    hidden: [['low-contrast', 'faded image']],
+  },
+  {
+    name: 'a backdrop an opaque background hides does not rescue text',
+    html: '<div style="background: #fff; position: relative; z-index: 1"><p style="color: #fff">white on white</p></div><div style="position: absolute; inset: 0; background: #000; z-index: 0"></div>',
+    visible: '',
+    hidden: [['low-contrast', 'white on white']],
+  },
+  {
+    name: 'a deferred subtree does not unbound a page that clips',
+    html: '<!doctype html><html style="overflow: hidden"><body><div style="height: 5000px"></div><div style="content-visibility: auto"><p style="margin-left: 99999px">far away</p></div></body></html>',
+    visible: '',
+    hidden: [['off-screen', 'far away']],
+  },
+  {
+    name: 'a fixed box does not borrow a scroll container range',
+    html: '<div id="box" style="width: 200px; height: 100px; overflow: auto"><div style="width: 5000px; height: 5000px"></div><p style="position: fixed; left: -3000px; top: 10px">escaped</p></div><script>box.scrollLeft = 3000; box.scrollTop = 3000</script>',
+    visible: '',
+    hidden: [['off-screen', 'escaped']],
+  },
+  {
+    name: 'white space inside a hidden box is not drawn',
+    html: '<p>a<span style="visibility: hidden"> </span>b</p><p>c<span style="font-size: 0"> </span>d</p>',
+    visible: 'ab\n\ncd',
   },
   // Color and contrast.
   {
@@ -497,6 +681,12 @@ export const cases: Case[] = [
     hidden: [['low-contrast', 'dark on dark']],
   },
   {
+    name: 'a page that supports both schemes is read in the preferred one',
+    html: '<!doctype html><html style="color-scheme: light dark"><body><p style="color: #121212">dark on light</p><p style="color: white">white on white</p></body></html>',
+    visible: 'dark on light',
+    hidden: [['low-contrast', 'white on white']],
+  },
+  {
     name: 'legacy color attributes',
     html: '<!doctype html><html><body bgcolor="black" text="black"><p>black on black</p><font color="chucknorris">red</font></body></html>',
     visible: 'red',
@@ -520,7 +710,7 @@ export const cases: Case[] = [
   },
   {
     name: 'large positioned boxes and table columns may paint behind text',
-    html: '<div style="position: fixed; inset: 0; background: #111"></div><main style="color: #eee"><p>dark theme</p></main><section style="position: relative"><div style="position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6)"></div><h1 style="position: relative; color: #fff">hero</h1></section><table><colgroup><col style="background: #000"></colgroup><tr><td style="color: #fff">cell</td></tr></table>',
+    html: '<div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><main style="color: #eee"><p>dark theme</p></main><section style="position: relative"><div style="position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6)"></div><h1 style="position: relative; color: #fff">hero</h1></section><table><colgroup><col style="background: #000"></colgroup><tr><td style="color: #fff">cell</td></tr></table>',
     visible: 'dark theme\n\nhero\ncell',
   },
   {
@@ -534,7 +724,7 @@ export const cases: Case[] = [
   },
   {
     name: 'the body background paints the canvas, below fixed backdrops',
-    html: '<!doctype html><body style="background: #fff"><div style="position: fixed; inset: 0; background: #111"></div><p style="color: #eee">over a fixed backdrop</p></body>',
+    html: '<!doctype html><body style="background: #fff"><div style="position: fixed; inset: 0; background: #111; z-index: -1"></div><p style="color: #eee">over a fixed backdrop</p></body>',
     visible: 'over a fixed backdrop',
   },
   {
@@ -719,6 +909,14 @@ export const cases: Case[] = [
     html: '<div><template shadowrootmode="closed"><slot name="a">fallback a</slot> <slot name="b">fallback b</slot></template><span slot="a">assigned a</span></div>',
     visible: 'assigned a fallback b',
     hidden: [['not-rendered', 'fallback a']],
+    diverges: [
+      {
+        where: 'browser',
+        visible: 'assigned a',
+        reason:
+          'A closed shadow root cannot be read from the page, so browser mode sees neither the slots nor their fallback content, only the light child that fills one.',
+      },
+    ],
   },
   {
     name: 'light children no slot accepts',

@@ -100,3 +100,35 @@ jobs:
 
       - name: Build distributables
         run: npm run build
+
+  # Browser mode runs the shared corpus inside a real engine, so each engine
+  # gets its own job: a failure names the engine that broke, and one engine
+  # being unavailable does not hide the other two.
+  browser:
+    name: Browser mode (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install ${{ matrix.browser }}
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      # The suite runs the browser corpus only for the engines this names.
+      - name: Run the suite with the browser corpus
+        run: npm test
+        env:
+          NAKED_EYE_BROWSERS: ${{ matrix.browser }}

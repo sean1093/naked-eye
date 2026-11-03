@@ -23,6 +23,16 @@
         "default": "./dist/index.cjs"
       }
     },
+    "./browser": {
+      "import": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.js"
+      },
+      "require": {
+        "types": "./dist/browser.d.cts",
+        "default": "./dist/browser.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -40,7 +50,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "typecheck": "tsc --noEmit",
-    "check:exports": "attw --pack . && publint",
+    "check:exports": "attw --pack . --profile node16 && publint",
     "size": "size-limit",
     "check:docs": "node scripts/check-docs.mjs",
     "prepublishOnly": "npm run build"
@@ -79,7 +89,9 @@
     "@size-limit/preset-small-lib": "^13.1.1",
     "@types/node": "^22.20.5",
     "@vitest/coverage-v8": "^4.1.12",
+    "playwright": "^1.64.1",
     "publint": "^0.3.25",
+    "puppeteer-core": "^24.43.1",
     "size-limit": "^13.1.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",

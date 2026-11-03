@@ -53,7 +53,12 @@ export type WarningCode =
   /** Generated content the engine does not render as text: counters, images, and text beyond 1,000,000 characters per document. */
   | 'unsupported-content'
   /** The document nests deeper than any real page; nothing was extracted. */
-  | 'document-too-deep';
+  | 'document-too-deep'
+  /**
+   * Browser mode only: a frame on another origin, whose document the page
+   * cannot read. Its text is missing from `text` and from `hidden`.
+   */
+  | 'cross-origin-frame';
 
 export interface Warning {
   code: WarningCode;

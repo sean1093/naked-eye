@@ -84,8 +84,9 @@ evaluates the rules both ways and keeps text only if it is visible in both.
 
 **Browser mode**, `extractVisibleFromPage(page, options)`, runs inside a page
 that Playwright or Puppeteer already has open. It reads the browser's computed
-styles and real geometry: the rectangles of each text node, clipping by
-ancestors, and the document's scrollable area.
+styles and real geometry: the rectangles of each text node, clipping and
+scrolling by ancestors, the document's scrollable area, and the boxes that may
+paint behind the text.
 
 Both modes return the same result shape and the same reason codes.
 
@@ -281,7 +282,38 @@ document, with a warning.
   static mode on the response HTML as well.
 - **Closed shadow roots** cannot be read from the page; their text is missing
   from `text`.
-- **Cross-origin frames** cannot be read; they are listed in `warnings`.
+- **Cross-origin frames** cannot be read; they are listed in `warnings` with
+  the `cross-origin-frame` code. A same-origin frame is read in place, after
+  the frame box itself is judged: an invisible, zero-sized or off-screen
+  `<iframe>` hides everything in it under that reason.
+- **Scrolling counts as reachable.** Text a reader can bring into view by
+  scrolling the page, or a box with `overflow: auto` or `scroll`, is on screen,
+  whatever the current scroll offset; a positioned box that does not scroll
+  with such an ancestor does not borrow its range. A `content-visibility: auto`
+  subtree past the end of the scroll area is reachable too, since scrolling
+  there renders it, but only as far as that subtree itself reaches and only on
+  an axis the page does not clip. Only what no scrolling reaches — outside the
+  document's scrollable area, or cut off by `overflow: hidden`, `overflow:
+  clip` or paint containment — is reported as `off-screen` or `clipped`.
+- **The backdrop is the set of boxes that may paint there.** As in static mode,
+  text is kept when it contrasts with any of them: the composite of its
+  ancestors, and that composite with a positioned box, `::before` or `::after`
+  slipped in under the ancestor it is laid out in. Only a box whose containing
+  block is one of the text's ancestors and whose rectangle covers the text
+  counts, its own opacity and `filter: opacity()` and its ancestors' are
+  applied to it, and an opaque background between it and the text hides it, as
+  on screen. A fixed box that fills the viewport counts over the whole page; a
+  smaller one only where it sits.
+- **Generated content has no box to select.** `::before`, `::after`,
+  `::first-line` and `::first-letter` are judged from their computed styles,
+  with the backdrop read at the middle of the element they belong to rather
+  than under the text itself. Only fonts, colors and visibility apply to
+  `::first-line`, and opacity to `::first-letter`, and what they hide is
+  reported for the whole block, as static mode reports it.
+- **Thresholds only.** `extractVisibleFromPage` takes `minFontSize`,
+  `minOpacity` and `minContrast`. The viewport, the color scheme and the style
+  sheets are the open page's own, and off-screen text is decided by real
+  geometry rather than by a distance.
 - **Timing.** The result is a snapshot. Content that appears later, or blinks,
   is judged as it was at the moment of extraction.
 

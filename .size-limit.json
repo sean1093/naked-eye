@@ -4,5 +4,11 @@
     "path": "dist/index.js",
     "limit": "110 kB",
     "gzip": true
+  },
+  {
+    "name": "naked-eye/browser (ESM with the embedded page script, gzipped)",
+    "path": "dist/browser.js",
+    "limit": "20 kB",
+    "gzip": true
   }
 ]

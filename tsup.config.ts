@@ -1,8 +1,9 @@
 import { defineConfig } from 'tsup';
+import { pageScriptEsbuildPlugin } from './scripts/page-script.js';
 
 export default defineConfig({
   // ESM (.js, because package.json is type: module) + CJS (.cjs) + types.
-  entry: { index: 'src/index.ts' },
+  entry: { index: 'src/index.ts', browser: 'src/browser.ts' },
   format: ['esm', 'cjs'],
   target: 'es2022',
   outDir: 'dist',
@@ -11,4 +12,6 @@ export default defineConfig({
   treeshake: true,
   splitting: false,
   clean: true,
+  // Embeds browser mode's in-page script; see scripts/page-script.ts.
+  esbuildPlugins: [pageScriptEsbuildPlugin()],
 });
