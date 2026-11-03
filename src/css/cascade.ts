@@ -12,6 +12,7 @@ import type { ComponentValue } from '@csstools/css-parser-algorithms';
 import { isFunctionNode } from '@csstools/css-parser-algorithms';
 import { TokenType } from '@csstools/css-tokenizer';
 import type { AnyNode, Document, Element } from 'domhandler';
+import type { ShadowRoot, ShadowTrees } from '../shadow.js';
 import type { Warning, WarningCode } from '../types.js';
 import { own } from '../util.js';
 import {
@@ -48,6 +49,7 @@ import {
   compareSpecificity,
   compileSelectorList,
   type Nesting,
+  type ShadowScope,
   type Specificity,
 } from './selectors.js';
 import { hasSubstitution, type SubstitutionContext, substitute } from './substitute.js';
@@ -249,6 +251,19 @@ interface SheetContext {
   origin: 'ua' | 'author';
   /** `@namespace` prefixes declared by the style sheet. */
   namespaces: Record<string, string>;
+  /** The shadow tree whose style sheet this is, or `null` for the document. */
+  scope: ShadowRoot | null;
+}
+
+/** The rules of one tree scope: the document, or one shadow tree. */
+interface ScopeRules {
+  layer: Layer;
+  index: Map<string, Entry[]>;
+  pseudoIndex: Record<PseudoElement, Map<string, Entry[]>>;
+  /** `::part()` rules by their first part name, matched against the host that exposes an element. */
+  parts: Map<string, Entry[]>;
+  /** For selector matching from inside a shadow tree. */
+  shadow: ShadowScope | null;
 }
 
 /** A definition that only exists in the second world when declared under an undecidable condition. */
@@ -393,7 +408,11 @@ function elementChildren(node: { children: AnyNode[] }): Element[] {
 }
 
 /** Builds the style engine for a parsed document. */
-export function createStyleEngine(document: Document, options: StyleOptions): StyleEngine {
+export function createStyleEngine(
+  document: Document,
+  options: StyleOptions,
+  shadow: ShadowTrees | null = null,
+): StyleEngine {
   const quirks = (document as unknown as { 'x-mode'?: string })['x-mode'] === 'quirks';
   const { environment } = options;
   const warnings: Warning[] = [];
@@ -404,14 +423,44 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     warnings.push({ code, message });
   };
 
-  const root = new Layer(null);
-  const index = new Map<string, Entry[]>();
-  const pseudoIndex: Record<PseudoElement, Map<string, Entry[]>> = {
-    before: new Map(),
-    after: new Map(),
-    'first-line': new Map(),
-    'first-letter': new Map(),
-  };
+  const newScope = (scopeShadow: ShadowScope | null): ScopeRules => ({
+    layer: new Layer(null),
+    index: new Map(),
+    pseudoIndex: {
+      before: new Map(),
+      after: new Map(),
+      'first-line': new Map(),
+      'first-letter': new Map(),
+    },
+    parts: new Map(),
+    shadow: scopeShadow,
+  });
+  const ua = newScope(null);
+  const documentScope = newScope(null);
+  const root = documentScope.layer;
+  const scopes = new Map<ShadowRoot | null, ScopeRules>([[null, documentScope]]);
+  for (const shadowRoot of shadow?.roots.values() ?? []) {
+    scopes.set(
+      shadowRoot,
+      newScope({
+        host: shadowRoot.host,
+        fragment: shadowRoot.fragment,
+        slotOf: (element) => {
+          // A slot assigned to another slot passes its nodes on, so ::slotted() matches in both trees.
+          for (
+            let entry = shadow?.assignedSlot(element);
+            entry !== undefined;
+            entry = shadow?.assignedSlot(entry.slot)
+          ) {
+            if (entry.root === shadowRoot) return entry.slot;
+          }
+          return undefined;
+        },
+      }),
+    );
+  }
+  const rulesOf = (ctx: SheetContext): ScopeRules =>
+    ctx.origin === 'ua' ? ua : (scopes.get(ctx.scope) as ScopeRules);
   const keyframes = new Map<string, Defined<Keyframe[]>[]>();
   const registered = new Map<string, Defined<Registration>[]>();
   const parsedSheets = new Map<string, Rule[]>();
@@ -465,18 +514,39 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       order: order++,
       origin: ctx.origin,
     };
+    const rules = rulesOf(ctx);
+    let chromiumOnly: Block | null = null;
     for (const selector of selectors) {
       const { pseudoElement } = selector;
       const target =
         pseudoElement === null
-          ? index
-          : Object.hasOwn(pseudoIndex, pseudoElement)
-            ? pseudoIndex[pseudoElement as PseudoElement]
+          ? rules.index
+          : Object.hasOwn(rules.pseudoIndex, pseudoElement)
+            ? rules.pseudoIndex[pseudoElement as PseudoElement]
             : null;
-      if (target === null) continue;
+      if (target === null && pseudoElement !== 'part') continue;
+      let owner = block;
+      if (selector.conditional) {
+        if (chromiumOnly === null) {
+          chromiumOnly = { ...block, conditional: true };
+          conditionalRules = true;
+          warn(
+            'unknown-condition',
+            ':host-context() matches only in Chromium; rules that use it were evaluated both ways',
+          );
+        }
+        owner = chromiumOnly;
+      }
+      if (target === null) {
+        const first = selector.part?.[0] ?? '';
+        const named = rules.parts.get(first);
+        if (named === undefined) rules.parts.set(first, [{ block: owner, selector }]);
+        else named.push({ block: owner, selector });
+        continue;
+      }
       const list = target.get(selector.bucket);
-      if (list === undefined) target.set(selector.bucket, [{ block, selector }]);
-      else list.push({ block, selector });
+      if (list === undefined) target.set(selector.bucket, [{ block: owner, selector }]);
+      else list.push({ block: owner, selector });
     }
   };
 
@@ -489,7 +559,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   const supportsSelector = (nodes: ComponentValue[]): Truth => {
     const result = compileSelectorList(serialize(nodes), quirks);
-    if ('selectors' in result) return true;
+    if ('selectors' in result)
+      return result.selectors.some((selector) => selector.conditional) ? 'unknown' : true;
     return result.syntax ? false : 'unknown';
   };
 
@@ -552,6 +623,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       quirks,
       ctx.parent?.nesting ?? {},
       ctx.namespaces,
+      rulesOf(ctx).shadow,
     );
     if ('selectors' in compiled) return compiled.selectors;
     if (!compiled.syntax)
@@ -801,88 +873,121 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     addSheet(sheetRules(url, css), next, depth + 1, new Set([...seen, url]));
   };
 
-  // User-agent sheet, then every author sheet in tree order.
+  // User-agent sheet, then every author sheet in tree order: the document's, then each shadow tree's.
   addSheet(
     parseStylesheet(UA_STYLESHEET),
-    { layer: root, conditional: false, parent: null, origin: 'ua', namespaces: {} },
+    {
+      layer: ua.layer,
+      conditional: false,
+      parent: null,
+      origin: 'ua',
+      namespaces: {},
+      scope: null,
+    },
     0,
     new Set(),
   );
-  const authorContext: SheetContext = {
-    layer: root,
+  const collectSheets = (nodes: readonly AnyNode[], authorContext: SheetContext): void => {
+    const stack: AnyNode[] = [...nodes].reverse();
+    while (stack.length > 0) {
+      const node = stack.pop() as AnyNode;
+      if (node.type !== 'tag' && node.type !== 'style' && node.type !== 'script') continue;
+      if (node.name === 'template') continue;
+      const attributes = node.attribs;
+      if (node.name === 'style') {
+        const type = attributes.type?.trim().toLowerCase();
+        if (type === undefined || type === '' || type === 'text/css') {
+          const media = condition(
+            evaluateMediaQueryList(parseMedia(attributes.media), environment),
+            authorContext,
+            'A media attribute',
+          );
+          const css = node.children
+            .map((child) => (child.type === 'text' ? child.data : ''))
+            .join('');
+          if (media !== null) addSheet(parseStylesheet(css), media, 0, new Set());
+        }
+      } else if (node.name === 'link') {
+        const rel = (attributes.rel ?? '').toLowerCase().split(/[\t\n\f\r ]+/);
+        const href = attributes.href;
+        if (
+          rel.includes('stylesheet') &&
+          !rel.includes('alternate') &&
+          attributes.disabled === undefined &&
+          href !== undefined
+        ) {
+          const media = condition(
+            evaluateMediaQueryList(parseMedia(attributes.media), environment),
+            authorContext,
+            'A media attribute',
+          );
+          const css = own(options.stylesheets, href);
+          if (css === undefined) {
+            warn(
+              'unresolved-stylesheet',
+              `<link rel="stylesheet" href="${href}"> was not applied: its CSS was not supplied`,
+            );
+          } else if (media !== null) addSheet(sheetRules(href, css), media, 1, new Set([href]));
+        }
+      }
+      for (let index = node.children.length - 1; index >= 0; index -= 1)
+        stack.push(node.children[index] as AnyNode);
+    }
+  };
+  const authorContext = (scope: ShadowRoot | null): SheetContext => ({
+    layer: (scopes.get(scope) as ScopeRules).layer,
     conditional: false,
     parent: null,
     origin: 'author',
     namespaces: {},
-  };
-  const stack: AnyNode[] = [...document.children].reverse();
-  while (stack.length > 0) {
-    const node = stack.pop() as AnyNode;
-    if (node.type !== 'tag' && node.type !== 'style' && node.type !== 'script') continue;
-    if (node.name === 'template') continue;
-    const attributes = node.attribs;
-    if (node.name === 'style') {
-      const type = attributes.type?.trim().toLowerCase();
-      if (type === undefined || type === '' || type === 'text/css') {
-        const media = condition(
-          evaluateMediaQueryList(parseMedia(attributes.media), environment),
-          authorContext,
-          'A media attribute',
-        );
-        const css = node.children
-          .map((child) => (child.type === 'text' ? child.data : ''))
-          .join('');
-        if (media !== null) addSheet(parseStylesheet(css), media, 0, new Set());
-      }
-    } else if (node.name === 'link') {
-      const rel = (attributes.rel ?? '').toLowerCase().split(/[\t\n\f\r ]+/);
-      const href = attributes.href;
-      if (
-        rel.includes('stylesheet') &&
-        !rel.includes('alternate') &&
-        attributes.disabled === undefined &&
-        href !== undefined
-      ) {
-        const media = condition(
-          evaluateMediaQueryList(parseMedia(attributes.media), environment),
-          authorContext,
-          'A media attribute',
-        );
-        const css = own(options.stylesheets, href);
-        if (css === undefined)
-          warn(
-            'unresolved-stylesheet',
-            `<link rel="stylesheet" href="${href}"> was not applied: its CSS was not supplied`,
-          );
-        else if (media !== null) addSheet(sheetRules(href, css), media, 1, new Set([href]));
-      }
-    }
-    for (let index = node.children.length - 1; index >= 0; index -= 1)
-      stack.push(node.children[index] as AnyNode);
+    scope,
+  });
+  collectSheets(document.children, authorContext(null));
+  for (const shadowRoot of shadow?.roots.values() ?? [])
+    collectSheets(shadowRoot.fragment.children, authorContext(shadowRoot));
+
+  // Layers order within each tree scope.
+  for (const rules of [ua, ...scopes.values()]) {
+    const ranks = { next: 0 };
+    const assignRanks = (layer: Layer): void => {
+      for (const child of layer.children.values()) assignRanks(child);
+      layer.rank = ranks.next++;
+    };
+    assignRanks(rules.layer);
   }
-  const ranks = { next: 0 };
-  const assignRanks = (layer: Layer): void => {
-    for (const child of layer.children.values()) assignRanks(child);
-    layer.rank = ranks.next++;
-  };
-  assignRanks(root);
 
   const hintLayer = new Layer(null);
   hintLayer.rank = -1;
 
+  /**
+   * A rule that matches an element. `context` counts the shadow boundaries
+   * between the rule's tree and the element's: inward for `:host` (1) and
+   * `::slotted()` (one more per slot that passed the element on), outward,
+   * as a negative count, for `::part()`.
+   */
+  interface Matched {
+    block: Block;
+    specificity: Specificity;
+    context: number;
+  }
+
   // Per-element matching is shared by both worlds.
-  const matchCache = new Map<Element, { block: Block; specificity: Specificity }[]>();
+  const matchCache = new Map<Element, Matched[]>();
   /** Rules from one index whose selector matches, each at its most specific matching selector. */
   const lookup = (
     element: Element,
     entries: Map<string, Entry[]>,
-  ): { block: Block; specificity: Specificity }[] => {
+    only?: string,
+    context = 0,
+  ): Matched[] => {
     const found = new Map<Block, Specificity>();
-    const keys = [element.name.toLowerCase(), '*'];
+    const keys = only === undefined ? [element.name.toLowerCase(), '*'] : [only];
     const id = element.attribs.id;
-    if (id !== undefined && id !== '') keys.push(`#${id}`);
-    for (const name of (element.attribs.class ?? '').split(/[\t\n\f\r ]+/))
-      if (name !== '') keys.push(`.${name}`);
+    if (only === undefined && id !== undefined && id !== '') keys.push(`#${id}`);
+    if (only === undefined) {
+      for (const name of (element.attribs.class ?? '').split(/[\t\n\f\r ]+/))
+        if (name !== '') keys.push(`.${name}`);
+    }
     for (const key of new Set(keys)) {
       for (const { block, selector } of entries.get(key) ?? []) {
         const previous = found.get(block);
@@ -891,19 +996,66 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
         if (selector.test(element)) found.set(block, selector.specificity);
       }
     }
-    return [...found].map(([block, specificity]) => ({ block, specificity }));
+    return [...found].map(([block, specificity]) => ({ block, specificity, context }));
   };
 
-  const pseudoMatches = (
-    element: Element,
-    which: PseudoElement,
-  ): { block: Block; specificity: Specificity }[] =>
-    pseudoIndex[which].size === 0 ? [] : lookup(element, pseudoIndex[which]);
+  const rulesFor = (element: Element): ScopeRules =>
+    scopes.get(shadow?.scopeOf(element) ?? null) as ScopeRules;
 
-  const matches = (element: Element): { block: Block; specificity: Specificity }[] => {
+  const pseudoMatches = (element: Element, which: PseudoElement): Matched[] => {
+    const entries = rulesFor(element).pseudoIndex[which];
+    const list = entries.size === 0 ? [] : lookup(element, entries);
+    // `:host::before` styles a host's pseudo-element from inside its shadow tree.
+    const ownShadow = shadow?.roots.get(element);
+    const inner =
+      ownShadow === undefined
+        ? undefined
+        : (scopes.get(ownShadow) as ScopeRules).pseudoIndex[which];
+    if (inner !== undefined && inner.size > 0)
+      for (const match of lookup(element, inner, ':host', 1)) list.push(match);
+    return list;
+  };
+
+  const matches = (element: Element): Matched[] => {
     const cached = matchCache.get(element);
     if (cached !== undefined) return cached;
-    const list = lookup(element, index);
+    const list = [...lookup(element, ua.index), ...lookup(element, rulesFor(element).index)];
+    // A shadow host is also styled from inside by `:host`, and a slotted element by the
+    // `::slotted()` rules of every shadow tree its chain of slots passes it into.
+    const ownShadow = shadow?.roots.get(element);
+    if (ownShadow !== undefined)
+      for (const match of lookup(element, (scopes.get(ownShadow) as ScopeRules).index, ':host', 1))
+        list.push(match);
+    let depth = 0;
+    for (
+      let entry = shadow?.assignedSlot(element);
+      entry !== undefined;
+      entry = shadow?.assignedSlot(entry.slot)
+    ) {
+      depth += 1;
+      const rules = scopes.get(entry.root) as ScopeRules;
+      for (const match of lookup(element, rules.index, ':slotted', depth)) list.push(match);
+    }
+    // A part is styled by `::part()` from the tree around each host exposing it, and the
+    // innermost one also from inside its own tree by `:host::part()`.
+    let outward = 0;
+    for (const { host, names } of shadow?.partsOf(element) ?? []) {
+      const trees: [ScopeRules, number, boolean][] = [
+        [scopes.get(shadow?.scopeOf(host) ?? null) as ScopeRules, outward - 1, false],
+      ];
+      if (outward === 0)
+        trees.push([scopes.get(shadow?.roots.get(host) ?? null) as ScopeRules, 0, true]);
+      outward -= 1;
+      for (const [rules, context, inside] of trees) {
+        for (const name of names) {
+          for (const { block, selector } of rules.parts.get(name) ?? []) {
+            if (inside && selector.bucket !== ':host') continue;
+            if (selector.part?.every((part) => names.has(part)) === true && selector.test(host))
+              list.push({ block, specificity: selector.specificity, context });
+          }
+        }
+      }
+    }
     const hints = presentationalHints(element);
     if (hints.length > 0) {
       list.push({
@@ -915,6 +1067,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
           origin: 'hint',
         },
         specificity: [0, 0, 0],
+        context: 0,
       });
     }
     const inline = element.attribs.style;
@@ -922,31 +1075,47 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       list.push({
         block: {
           declarations: toDeclarations(parseStyleAttribute(inline)),
-          layer: root,
+          layer: rulesFor(element).layer,
           conditional: false,
           order: order + 1,
           origin: 'inline',
         },
         specificity: [0, 0, 0],
+        context: 0,
       });
     }
     matchCache.set(element, list);
     return list;
   };
 
-  /** Precedence, highest wins: origin and importance, style attribute, layer, specificity, order. */
+  /**
+   * Precedence, highest wins: origin and importance (presentational hints sit
+   * between the user agent and the author), shadow context (outer rules win
+   * for normal declarations, inner ones for `!important`), style attribute,
+   * layer, specificity, order.
+   */
   const keyOf = (
     block: Block,
     decl: Decl,
     specificity: Specificity,
     position: number,
+    context: number,
   ): number[] => {
     let tier: number;
-    if (block.origin === 'ua') tier = decl.important ? 4 : 0;
-    else if (block.origin === 'animation') tier = 2;
-    else tier = decl.important ? 3 : 1;
+    if (block.origin === 'ua') tier = decl.important ? 5 : 0;
+    else if (block.origin === 'hint') tier = 1;
+    else if (block.origin === 'animation') tier = 3;
+    else tier = decl.important ? 4 : 2;
     const layer = block.origin === 'ua' ? 0 : decl.important ? -block.layer.rank : block.layer.rank;
-    return [tier, block.origin === 'inline' ? 1 : 0, layer, ...specificity, block.order, position];
+    return [
+      tier,
+      decl.important ? context : -context,
+      block.origin === 'inline' ? 1 : 0,
+      layer,
+      ...specificity,
+      block.order,
+      position,
+    ];
   };
 
   interface Candidate {
@@ -956,17 +1125,14 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     origin: Block['origin'];
   }
 
-  const candidatesFor = (
-    list: { block: Block; specificity: Specificity }[],
-    world: World,
-  ): Map<string, Candidate[]> => {
+  const candidatesFor = (list: Matched[], world: World): Map<string, Candidate[]> => {
     const byProperty = new Map<string, Candidate[]>();
-    for (const { block, specificity } of list) {
+    for (const { block, specificity, context } of list) {
       if (block.conditional && world === 0) continue;
       for (const [position, decl] of block.declarations.entries()) {
         const candidate = {
           decl,
-          key: keyOf(block, decl, specificity, position),
+          key: keyOf(block, decl, specificity, position, context),
           layer: block.layer,
           origin: block.origin,
         };
@@ -1014,12 +1180,14 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
   }
 
   const worlds: Map<Element, Computed>[] = [new Map(), new Map()];
-  const parentOf = (element: Element): Element | null =>
-    element.parent?.type === 'tag' ||
-    element.parent?.type === 'script' ||
-    element.parent?.type === 'style'
-      ? (element.parent as Element)
+  const parentOf = (element: Element): Element | null => {
+    if (shadow !== null) return shadow.flatParent(element);
+    const parent = element.parent;
+    return parent !== null &&
+      (parent.type === 'tag' || parent.type === 'script' || parent.type === 'style')
+      ? (parent as Element)
       : null;
+  };
 
   const rootFontSize: [number, number] = [16, 16];
   const lengthContext = (element: Element, style: Style, world: World): Context => ({
@@ -1167,7 +1335,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       out.push(
         block.declarations.map((decl, at) => ({
           decl,
-          key: [2, 0, 0, 0, 0, 0, position, at],
+          key: [2, 1, 0, 0, 0, 0, 0, position, at],
           layer: root,
           origin: 'animation',
         })),
@@ -1198,19 +1366,17 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     }
     const known = cache.get(element);
     if (known !== undefined) return known;
-    if (pseudoIndex[which].size === 0) return null;
+    // No matching rule: nothing to compute, and nothing worth caching.
     const matched = pseudoMatches(element, which);
-    const computed =
-      matched.length === 0
-        ? null
-        : computeStyle(
-            element,
-            compute(element, world),
-            matched,
-            world,
-            false,
-            which === 'before' || which === 'after',
-          );
+    if (matched.length === 0) return null;
+    const computed = computeStyle(
+      element,
+      compute(element, world),
+      matched,
+      world,
+      false,
+      which === 'before' || which === 'after',
+    );
     cache.set(element, computed);
     return computed;
   };
@@ -1246,7 +1412,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
   const computeStyle = (
     element: Element,
     parent: Computed | null,
-    matched: { block: Block; specificity: Specificity }[],
+    matched: Matched[],
     world: World,
     isRoot: boolean,
     pseudo = false,
@@ -1581,6 +1747,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   // Compute in tree order, iteratively, so that deep documents cannot overflow the stack.
   const queue: Element[] = elementChildren(document);
+  for (const shadowRoot of shadow?.roots.values() ?? [])
+    for (const child of elementChildren(shadowRoot.fragment)) queue.push(child);
   for (let cursor = 0; cursor < queue.length; cursor += 1) {
     const element = queue[cursor] as Element;
     compute(element, 0);

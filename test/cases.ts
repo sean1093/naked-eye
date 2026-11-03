@@ -707,4 +707,116 @@ export const cases: Case[] = [
     visible: 'keep',
     hidden: [['opacity', 'secret']],
   },
+
+  // Declarative shadow DOM renders the flat tree.
+  {
+    name: 'named and default slots',
+    html: '<div><template shadowrootmode="open"><p>shadow</p><slot name="title"></slot><slot></slot></template><span slot="title">named</span> default text <b>bold</b></div>',
+    visible: 'shadow\n\nnamed default text bold',
+  },
+  {
+    name: 'slot fallback content, in a closed root',
+    html: '<div><template shadowrootmode="closed"><slot name="a">fallback a</slot> <slot name="b">fallback b</slot></template><span slot="a">assigned a</span></div>',
+    visible: 'assigned a fallback b',
+    hidden: [['not-rendered', 'fallback a']],
+  },
+  {
+    name: 'light children no slot accepts',
+    html: '<div><template shadowrootmode="open"><slot name="only"></slot></template><span slot="only">kept</span><span>no default slot</span><span slot="missing">no such slot</span></div>',
+    visible: 'kept',
+    hidden: [['unslotted', 'no default slot no such slot']],
+  },
+  {
+    name: 'a shadow root without slots renders none of the light children',
+    html: '<div><template shadowrootmode="open">replaced</template>light text</div>',
+    visible: 'replaced',
+    hidden: [['unslotted', 'light text']],
+  },
+  {
+    name: 'nested shadow roots, with a slot passed on to the inner one',
+    html: '<div><template shadowrootmode="open"><section><template shadowrootmode="open"><p>inner shadow</p><slot></slot></template><slot name="title"></slot> inner light</section></template><b slot="title">forwarded</b></div>',
+    visible: 'inner shadow\n\nforwarded inner light',
+  },
+  {
+    name: 'templates that do not attach stay inert',
+    html: '<div><template shadowrootmode="open">first root</template><template shadowrootmode="open">second</template></div><ul><template shadowrootmode="open">not a valid host</template><li>item</li></ul><div><template shadowrootmode="sideways">bad mode</template>light</div>',
+    visible: 'first root\nitem\nlight',
+  },
+  {
+    name: 'style sheets apply only inside their own tree',
+    html: '<style>.hide { display: none }</style><div><template shadowrootmode="open"><style>p { display: none }</style><p>shadow paragraph</p><span class="hide">document class inside</span><slot></slot></template><p>light paragraph</p></div><p>document paragraph</p>',
+    visible: 'document class inside\n\nlight paragraph\n\ndocument paragraph',
+    hidden: [['display-none', 'shadow paragraph']],
+  },
+  {
+    name: ':host and ::slotted() rules',
+    html: '<div><template shadowrootmode="open"><style>:host { display: none }</style>hidden host</template></div><div><template shadowrootmode="open"><style>::slotted(.x) { display: none }</style><slot></slot></template><span class="x">slotted hidden</span><span>slotted shown</span></div>',
+    visible: 'slotted shown',
+    hidden: [
+      ['display-none', 'hidden host'],
+      ['display-none', 'slotted hidden'],
+    ],
+  },
+  {
+    name: 'outer rules beat :host rules, unless the inner one is important',
+    html: '<style>#outer, #important { display: block }</style><div id="outer"><template shadowrootmode="open"><style>:host { display: none }</style>outer wins</template></div><div id="important"><template shadowrootmode="open"><style>:host { display: none !important }</style>important inner wins</template></div>',
+    visible: 'outer wins',
+    hidden: [['display-none', 'important inner wins']],
+  },
+  {
+    name: '::slotted() rules of a tree the slot passes the element into',
+    html: '<div><template shadowrootmode="open"><section><template shadowrootmode="open"><style>::slotted(b) { display: none }</style><slot></slot></template><slot></slot></section></template><b>hidden by the inner tree</b><i>shown</i></div>',
+    visible: 'shown',
+    hidden: [['display-none', 'hidden by the inner tree']],
+  },
+  {
+    name: 'arguments that are not one compound selector invalidate the rule',
+    html: '<div><template shadowrootmode="open"><style>::slotted(div span) { display: none } :host(body div) { display: none }</style><slot></slot></template><span>kept</span></div>',
+    visible: 'kept',
+  },
+  {
+    name: 'inheritance follows the flat tree',
+    html: '<div><template shadowrootmode="open"><slot style="visibility: hidden"></slot></template><span>inherits from the slot</span></div><div style="visibility: hidden"><template shadowrootmode="open"><p style="visibility: visible">visible inside a hidden host</p></template></div>',
+    visible: 'visible inside a hidden host',
+    hidden: [['visibility-hidden', 'inherits from the slot']],
+  },
+  {
+    name: 'backgrounds behind shadow and slotted text follow the flat tree',
+    html: '<div style="background: #000"><template shadowrootmode="open"><p style="color: #fff">white in a dark host</p></template></div><div style="background: #fff"><template shadowrootmode="open"><div style="background: #000"><slot></slot></div></template><span style="color: #fff">slotted onto dark</span></div>',
+    visible: 'white in a dark host\n\nslotted onto dark',
+  },
+  {
+    name: '::part() rules from the tree around the host',
+    html: '<style>#card::part(secret) { display: none } #card::part(title) { visibility: visible } #other::part(title) { display: none }</style><div id="card"><template shadowrootmode="open"><style>[part~="title"] { visibility: hidden }</style><p part="label secret">hidden from outside</p><p part="title">the outer rule wins</p></template></div>',
+    visible: 'the outer rule wins',
+    hidden: [['display-none', 'hidden from outside']],
+  },
+  {
+    name: 'exportparts forwards a part one tree further out',
+    html: '<style>#outer::part(exported) { display: none } #outer::part(other) { display: none }</style><div id="outer"><template shadowrootmode="open"><section exportparts="inner: exported"><template shadowrootmode="open"><p part="inner">hidden through exportparts</p><p part="other">not exported</p></template></section></template></div>',
+    visible: 'not exported',
+    hidden: [['display-none', 'hidden through exportparts']],
+  },
+  {
+    name: ':host::part() from inside the host',
+    html: '<div><template shadowrootmode="open"><style>:host::part(own) { display: none }</style><p part="own">hidden by its own tree</p><p>kept</p></template></div>',
+    visible: 'kept',
+    hidden: [['display-none', 'hidden by its own tree']],
+  },
+  {
+    name: 'reserved custom element names do not host shadow roots',
+    html: '<font-face><template shadowrootmode="open">template text</template>real text</font-face>',
+    visible: 'real text',
+  },
+  {
+    name: ':host() counts its argument in specificity',
+    html: '<div class="a"><template shadowrootmode="open"><style>:host(.a) { display: none } :host { display: block }</style>more specific hides</template></div><div class="b"><template shadowrootmode="open"><style>:host(.b) { display: block } :host { display: none }</style>more specific shows</template></div>',
+    visible: 'more specific shows',
+    hidden: [['display-none', 'more specific hides']],
+  },
+  {
+    name: ':host::part() does not see names exported from deeper trees',
+    html: '<div><template shadowrootmode="open"><style>:host::part(e) { display: none }</style><section exportparts="inner: e"><template shadowrootmode="open"><p part="inner">exported, still shown</p></template></section></template></div>',
+    visible: 'exported, still shown',
+  },
 ];

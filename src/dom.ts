@@ -27,8 +27,17 @@ export class DepthExceededError extends Error {
  */
 export function parseHtml(html: string): Document {
   const depths = new WeakMap<object, number>();
+  // A template's content fragment is created before the template is attached, so
+  // its depth is looked up through the template once its children arrive.
+  const owners = new WeakMap<object, object>();
+  const depthOf = (node: object): number => {
+    const known = depths.get(node);
+    if (known !== undefined) return known;
+    const owner = owners.get(node);
+    return owner === undefined ? 0 : (depths.get(owner) ?? 0) + 1;
+  };
   const place = (parent: ParentNode, node: object): void => {
-    const depth = (depths.get(parent) ?? 0) + 1;
+    const depth = depthOf(parent) + 1;
     if (depth > MAX_DEPTH) throw new DepthExceededError();
     depths.set(node, depth);
   };
@@ -41,6 +50,11 @@ export function parseHtml(html: string): Document {
     insertBefore(parent, node, reference) {
       place(parent, node);
       adapter.insertBefore(parent, node, reference);
+    },
+    // Template content hangs below its template, so nested templates count as nesting.
+    setTemplateContent(template, content) {
+      owners.set(content, template);
+      adapter.setTemplateContent(template, content);
     },
   };
   return parse(html, { treeAdapter, scriptingEnabled: true });

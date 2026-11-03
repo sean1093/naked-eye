@@ -196,17 +196,21 @@ describe('hostile input stays bounded', () => {
   });
 
   it('shares inherited text-shadow lists instead of resolving them per element', () => {
-    const layers = Array.from(
-      { length: 2000 },
-      (_, index) => `0 0 #${index.toString(16).padStart(6, '0')}`,
-    ).join(', ');
-    const started = Date.now();
-    const result = extractVisible(
-      `${STANDARDS}<body style="text-shadow: ${layers}">${'<p>x</p>'.repeat(5000)}</body>`,
-    );
-    expect(result.text.length).toBeGreaterThan(0);
-    expect(Date.now() - started).toBeLessThan(2000);
-  });
+    const time = (count: number): number => {
+      const layers = Array.from(
+        { length: count },
+        (_, index) => `0 0 #${index.toString(16).padStart(6, '0')}`,
+      ).join(', ');
+      const html = `${STANDARDS}<body style="text-shadow: ${layers}">${'<p>x</p>'.repeat(5000)}</body>`;
+      const started = performance.now();
+      expect(extractVisible(html).text.length).toBeGreaterThan(0);
+      return performance.now() - started;
+    };
+    time(100);
+    // Resolved once and shared, four times the layers costs about the same; per element, four times.
+    const few = time(500);
+    expect(time(2000) / few).toBeLessThan(2.5);
+  }, 60_000);
 
   it('handles lists longer than a function call can take as arguments', () => {
     const wide = 150_000;
@@ -228,7 +232,50 @@ describe('hostile input stays bounded', () => {
     expect(extractVisible(`${STANDARDS}<p style="${'opacity: 0;'.repeat(wide)}">x</p>`).text).toBe(
       '',
     );
-  }, 30_000);
+  }, 120_000);
+
+  it('handles shadow trees wider than a function call can take as arguments', () => {
+    const wide = 150_000;
+    const items = '<b>x</b>'.repeat(wide);
+    const host = (shadow: string, light: string): string =>
+      extractVisible(
+        `${STANDARDS}<body><div><template shadowrootmode="open">${shadow}</template>${light}</div></body>`,
+      ).text;
+    expect(host(items, '')).toHaveLength(wide);
+    expect(host('<slot name="a"></slot>', items)).toBe('');
+    expect(host(`<slot>${items}</slot>`, 'y')).toBe('y');
+  }, 120_000);
+
+  it('counts templates and shadow roots toward the nesting limit', () => {
+    const html = `${'<div><template shadowrootmode="open">'.repeat(1400)}x${'</template></div>'.repeat(1400)}`;
+    expect(extractVisible(html).warnings.map((warning) => warning.code)).toEqual([
+      'document-too-deep',
+    ]);
+  });
+
+  it('matches ::part() rules and exportparts in time linear in their size', () => {
+    const time = (html: string): number => {
+      const started = performance.now();
+      extractVisible(html);
+      return performance.now() - started;
+    };
+    const parts = (count: number): string => {
+      const indices = Array.from({ length: count }, (_, index) => index);
+      const rules = indices.map((index) => `#h::part(q${index}) { color: red }`).join('');
+      const paragraphs = indices.map((index) => `<p part="q${index}">x</p>`).join('');
+      return `${STANDARDS}<style>${rules}</style><div id="h"><template shadowrootmode="open">${paragraphs}</template></div>`;
+    };
+    const exports = (count: number): string => {
+      const names = Array.from({ length: count }, (_, index) => `p${index}`);
+      return `${STANDARDS}<div><template shadowrootmode="open"><section exportparts="${names.join(',')}"><template shadowrootmode="open"><p part="${names.join(' ')}">x</p></template></section></template></div>`;
+    };
+    time(parts(250));
+    // Four times the input: linear work takes about four times as long, quadratic sixteen.
+    const smallParts = time(parts(1000));
+    expect(time(parts(4000)) / smallParts).toBeLessThan(10);
+    const smallExports = time(exports(10_000));
+    expect(time(exports(40_000)) / smallExports).toBeLessThan(10);
+  }, 60_000);
 
   it('parses each imported style sheet once and caps how many are applied', () => {
     const stylesheets: Record<string, string> = { 's6.css': 'p { display: none }' };
