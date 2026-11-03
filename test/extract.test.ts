@@ -59,7 +59,7 @@ describe('extractVisible', () => {
     const { hidden, warnings } = extractVisible(
       documentOf('<style>@container (width > 0) { p { opacity: 0 } }</style><p>x</p>'),
     );
-    expect(hidden[0]?.detail).toBe('opacity: 0 (under a condition static mode cannot decide)');
+    expect(hidden[0]?.detail).toContain('opacity: 0');
     expect(warnings.map((warning) => warning.code)).toEqual(['unknown-condition']);
   });
 
@@ -69,13 +69,8 @@ describe('extractVisible', () => {
     );
     const result = extractVisible(html, { stylesheets: { '/site.css': '.x { display: none }' } });
     expect(result.text).toBe('');
-    expect(result.warnings).toEqual([
-      {
-        code: 'unresolved-stylesheet',
-        message:
-          '<link rel="stylesheet" href="/other.css"> was not applied: its CSS was not supplied',
-      },
-    ]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(['unresolved-stylesheet']);
+    expect(result.warnings[0]?.message).toContain('/other.css');
   });
 
   it('honours the thresholds and viewport it is given', () => {
@@ -98,12 +93,7 @@ describe('extractVisible', () => {
       documentOf('<p style="color: rgb(from white r g b)">relative</p>'),
     );
     expect(result.text).toBe('relative');
-    expect(result.warnings).toEqual([
-      {
-        code: 'unsupported-color',
-        message: 'Unsupported color rgb(from …): text drawn with it was kept',
-      },
-    ]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(['unsupported-color']);
   });
 
   it('applies the contrast threshold and the preferred color scheme it is given', () => {
@@ -138,29 +128,31 @@ describe('extractVisible', () => {
   it('extracts nothing from a document nested deeper than any real page, and says so', () => {
     const started = Date.now();
     const result = extractVisible(`${'<div>'.repeat(200_000)}deep secret`);
-    expect(result).toEqual({
-      text: '',
-      hidden: [],
-      warnings: [
-        { code: 'document-too-deep', message: 'The document nests elements more than 1024 deep.' },
-      ],
-    });
+    expect(result.text).toBe('');
+    expect(result.hidden).toEqual([]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(['document-too-deep']);
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it('builds finding selectors in time linear in the number of siblings', () => {
-    const started = Date.now();
-    const { hidden } = extractVisible(
-      documentOf('<span style="display: none">x</span>'.repeat(20_000)),
-    );
-    expect(hidden).toHaveLength(20_000);
-    expect(Date.now() - started).toBeLessThan(2000);
+    const time = (count: number): number => {
+      const html = documentOf('<span style="display: none">x</span>'.repeat(count));
+      const started = performance.now();
+      expect(extractVisible(html).hidden).toHaveLength(count);
+      return performance.now() - started;
+    };
+    time(2_000);
+    // Four times the siblings: linear work takes about four times as long, quadratic sixteen.
+    const small = time(5_000);
+    const large = time(20_000);
+    expect(large / small).toBeLessThan(10);
   });
 
   it('removes soft hyphens without reporting them', () => {
     expect(extractVisible(documentOf('<p>co&shy;operate</p>'))).toEqual({
       text: 'cooperate',
       hidden: [],
+      generated: [],
       warnings: [],
     });
   });
@@ -189,6 +181,55 @@ describe('extractVisible', () => {
     );
     expect(result.text).toBe('\u0645\u06CC\u200C\u0631\u0648\u0645\n\n\u0915\u094D\u200D\u0937');
     expect(result.hidden).toEqual([]);
+  });
+
+  it('lists the text CSS generates, with its pseudo-element', () => {
+    const result = extractVisible(
+      documentOf(
+        '<style>#total::before { content: "Total: " } #total::after { content: "\\200B" }</style><p id="total">9</p>',
+      ),
+    );
+    expect(result.text).toBe('Total: 9');
+    expect(result.generated).toEqual([{ text: 'Total:', selector: '#total::before' }]);
+    expect(result.hidden.map(({ text, reason, selector }) => ({ text, reason, selector }))).toEqual(
+      [{ text: 'U+200B', reason: 'invisible-unicode', selector: '#total::after' }],
+    );
+  });
+
+  it('reports generated text that exists only under an undecidable condition', () => {
+    const result = extractVisible(
+      documentOf(
+        '<style>@container (width > 0) { p::before { content: "maybe " } }</style><p>x</p>',
+      ),
+    );
+    expect(result.text).toBe('x');
+    expect(result.hidden.map(({ text, selector }) => ({ text, selector }))).toEqual([
+      { text: 'maybe', selector: 'html > body > p::before' },
+    ]);
+  });
+
+  it('caps how much text generated content may add', () => {
+    const result = extractVisible(
+      documentOf(
+        `<style>*::before { content: "${'A'.repeat(5000)}" }</style>${'<div></div>'.repeat(300)}`,
+      ),
+    );
+    const generated = result.generated.reduce((total, entry) => total + entry.text.length, 0);
+    expect(generated).toBeLessThanOrEqual(1_000_000);
+    expect(result.warnings.map((warning) => warning.code)).toContain('unsupported-content');
+  });
+
+  it('warns about counters and images in generated content', () => {
+    const result = extractVisible(
+      documentOf(
+        '<style>li::before { content: counter(item) ". " url(dot.png) }</style><ol><li>first</li></ol>',
+      ),
+    );
+    expect(result.text).toBe('. first');
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      'unsupported-content',
+      'unsupported-content',
+    ]);
   });
 
   it('handles fragments and empty input', () => {

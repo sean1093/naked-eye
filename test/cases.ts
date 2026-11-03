@@ -622,6 +622,78 @@ export const cases: Case[] = [
     hidden: [['invisible-unicode', 'run rm -rf']],
   },
 
+  // CSS generated content: on screen, not in the DOM.
+  {
+    name: 'generated text is part of what a human sees',
+    html: '<style>.price::before { content: "$" } .price::after { content: " USD" } a::after { content: " (" attr(href) ")" }</style><p class="price">42</p><a href="https://evil.example/pay">pay here</a>',
+    visible: '$42 USD\n\npay here (https://evil.example/pay)',
+  },
+  {
+    name: 'quotes, and elements without a content box',
+    html: '<style>q::before { content: open-quote } q::after { content: close-quote } img::before, input::after, br::before { content: "never" }</style><p><q>quoted</q><img src="x.png" alt=""><input value="v"></p>',
+    visible: '\u201Cquoted\u201D',
+  },
+  {
+    name: 'a pseudo-element paints its own background behind its text',
+    html: '<style>p { background: #fff } .b::before { content: "black on black "; color: #000; background: #000 } .l::first-line { color: #000; background: #000 }</style><p class="b">x</p><p class="l">first line on black</p>',
+    visible: 'x',
+    hidden: [
+      ['low-contrast', 'black on black'],
+      ['low-contrast', 'first line on black'],
+    ],
+  },
+  {
+    name: '::first-line ignores what does not apply to it',
+    html: '<style>.n::first-line { display: none; position: absolute; left: -9999px; margin-left: -9999px; opacity: 0; zoom: 0.01; clip-path: circle(0); content-visibility: hidden }</style><p class="n">still shown</p>',
+    visible: 'still shown',
+  },
+  {
+    name: '::first-line on a positioned inline box, which is a block container',
+    html: '<style>span::first-line { font-size: 0 }</style><span style="position: absolute">positioned</span>',
+    visible: '',
+    hidden: [['font-size', 'positioned']],
+  },
+  {
+    name: 'generated text on a rule, and around a missing attribute',
+    html: '<style>hr::before { content: "rule text" } p::before { content: "A" attr(data-missing) "B" }</style><hr><p>x</p>',
+    visible: 'rule text\n\nABx',
+  },
+  {
+    name: 'the quotes property',
+    html: '<style>q::before { content: open-quote } q::after { content: close-quote } .none { quotes: none } .custom { quotes: "\u00AB" "\u00BB" }</style><p><q class="none">plain</q> <q class="custom">custom</q> <q>auto</q></p>',
+    visible: 'plain \u00ABcustom\u00BB \u201Cauto\u201D',
+  },
+  {
+    name: 'pseudo-elements that generate nothing',
+    html: '<style>p::before { content: none } p::after { content: normal } i::before { content: "\\f101" }</style><p>plain</p><i>icon</i>',
+    visible: 'plain\n\nicon',
+  },
+  {
+    name: '::first-line and ::first-letter styles that hide the start of a block',
+    html: '<style>.a::first-line { font-size: 0 } .b::first-line { color: transparent } .c::first-letter { color: transparent } .d::first-line { color: #333; font-weight: bold } .e::first-letter { font-size: 3em }</style><p class="a">tiny first line</p><p class="b">transparent <b>first</b> line</p><p class="c">"Hello," she said</p><p class="d">styled first line</p><p class="e">Drop cap</p>',
+    visible: 'ello," she said\n\nstyled first line\n\nDrop cap',
+    hidden: [
+      ['font-size', 'tiny first line'],
+      ['transparent-text', 'transparent first line'],
+      ['transparent-text', '"H'],
+    ],
+  },
+  {
+    name: 'a positioned ::before overlay is a backdrop',
+    html: '<style>.hero { position: relative } .hero::before { content: ""; position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6) } .hero h1 { position: relative; color: #fff }</style><section class="hero"><h1>overlay title</h1></section>',
+    visible: 'overlay title',
+  },
+  {
+    name: 'hidden generated text',
+    html: '<style>.a::before { content: "secret "; font-size: 0 } .b::after { content: " hidden"; display: none } .c::before { content: "faded "; opacity: 0 }</style><p class="a">x</p><p class="b">y</p><p class="c">z</p>',
+    visible: 'x\n\ny\n\nz',
+    hidden: [
+      ['font-size', 'secret'],
+      ['display-none', 'hidden'],
+      ['opacity', 'faded'],
+    ],
+  },
+
   // The cascade is followed wherever it leads.
   {
     name: 'hiding reached through a layer, nesting and a custom property',

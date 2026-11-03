@@ -4,7 +4,7 @@
  * browser mode builds it inside the page. Sharing the assembly is what makes
  * the two modes return the same text for the same rendering.
  */
-import type { HiddenReason, HiddenText } from './types.js';
+import type { GeneratedText, HiddenReason, HiddenText } from './types.js';
 import { MAY_CONTAIN_INVISIBLE, type Removal, stripInvisible } from './unicode.js';
 
 /** How white space in a text run is processed (CSS `white-space-collapse`). */
@@ -28,8 +28,16 @@ export interface Verdict {
 }
 
 export type RenderNode =
-  /** `origin` names the element a visible text belongs to, for findings about invisible characters in it. */
-  | { kind: 'text'; text: string; space: Space; hidden: Verdict | null; origin?: string }
+  | {
+      kind: 'text';
+      text: string;
+      space: Space;
+      hidden: Verdict | null;
+      /** The element a visible text belongs to, for findings about invisible characters in it. */
+      origin?: string;
+      /** Set on text that CSS generates (`::before`, `::after`): the pseudo-element's selector. */
+      generated?: string;
+    }
   | { kind: 'break' }
   | { kind: 'box'; layout: Layout; children: RenderNode[] };
 
@@ -111,9 +119,14 @@ const INVISIBLE_DETAIL: Record<Removal['kind'], [string, string]> = {
 };
 
 /** Turns render trees into the visible text and the hidden findings, in document order. */
-export function assemble(roots: readonly RenderNode[]): { text: string; hidden: HiddenText[] } {
+export function assemble(roots: readonly RenderNode[]): {
+  text: string;
+  hidden: HiddenText[];
+  generated: GeneratedText[];
+} {
   const builder = new Builder();
   const findings = new Map<string, HiddenText>();
+  const generated = new Map<string, GeneratedText>();
   const report = (text: string, { reason, selector, detail }: Verdict): void => {
     if (text === '') return;
     const key = `${selector}\u0000${reason}\u0000${detail}`;
@@ -156,6 +169,12 @@ export function assemble(roots: readonly RenderNode[]): { text: string; hidden: 
             });
           }
         }
+        if (node.generated !== undefined && squash(text) !== '') {
+          const existing = generated.get(node.generated);
+          if (existing === undefined)
+            generated.set(node.generated, { text: squash(text), selector: node.generated });
+          else existing.text += ` ${squash(text)}`;
+        }
         if (text !== '') {
           const end = text.length - 1;
           const unit = text.charCodeAt(end);
@@ -180,5 +199,9 @@ export function assemble(roots: readonly RenderNode[]): { text: string; hidden: 
   };
 
   for (const root of roots) visit(root, 0);
-  return { text: builder.result(), hidden: [...findings.values()] };
+  return {
+    text: builder.result(),
+    hidden: [...findings.values()],
+    generated: [...generated.values()],
+  };
 }

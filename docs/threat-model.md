@@ -123,6 +123,11 @@ finding.
 | Opacity | `opacity: 0.01`, `filter: opacity(0)` | yes | yes | `opacity` | [#5][i5] |
 | Tiny text | `font-size: 0`, `font: 0/0 a`, `zoom: 0.01`, `transform: scale(0)` | yes | yes | `font-size` | [#5][i5] |
 | Fill-forwards animations | `animation: fade 0s forwards` ending at `opacity: 0` | yes | yes | as the property | [#5][i5] |
+| The start of a block | `::first-line { font-size: 0 }`, `::first-letter { color: transparent }` | approx. | yes | as the property | [#8][i8] |
+
+Static mode cannot tell where a block's first line ends, so when `::first-line`
+styles hide text, it reports every line of the block. `::first-letter` hides the
+first letter and the punctuation around it, as a browser does.
 
 The cascade is computed the way browsers compute it, because the attacker writes
 the CSS: selectors of any kind, `!important`, cascade layers, nesting, custom
@@ -184,7 +189,12 @@ The opposite gap also exists: text a human sees that is not in the DOM. CSS
 DOM-only extractor never sees, so the model and the human disagree about what
 the page says. `naked-eye` renders generated content into `text` at its
 position, subject to the same hiding rules, and lists each insertion in
-`generated` ([#8][i8]).
+`generated` ([#8][i8]). Strings, `attr()` and quotes are rendered (quotes at
+their outermost `quotes` level); counters and images are reported in
+`warnings`; icon-font glyphs in the Private Use Area are pictures, not text, and
+are dropped. List markers (`::marker`) are not read. One rule can repeat its
+text on every element, so generated text stops at 1,000,000 characters per
+document, with a warning.
 
 ## Non-goals
 
