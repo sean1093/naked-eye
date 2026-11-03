@@ -169,6 +169,46 @@ const MIN_STROKE = 0.5;
 const MAX_SHADOW_BLUR = 0.25;
 const DARK_CANVAS: RGBA = { r: 0x12 / 255, g: 0x12 / 255, b: 0x12 / 255, a: 1 };
 
+/** Boxes `::first-line` and `::first-letter` apply to: block containers. */
+function isBlockContainer(style: Style, blockified: boolean): boolean {
+  const { display } = style;
+  if (display.kind === 'internal')
+    return display.role === 'table-cell' || display.role === 'table-caption';
+  if (display.kind !== 'box') return false;
+  if (display.inner === 'flow-root') return true;
+  return display.inner === 'flow' && (blockified || display.outer !== 'inline');
+}
+
+/** Leading punctuation, the first letter, digit or symbol with its marks, and trailing punctuation. */
+const FIRST_LETTER = /^\s*(?:\p{P}\p{Zs}*)*[\p{L}\p{N}\p{S}]\p{M}*\p{P}*/u;
+
+/**
+ * Hides the first letter of a block's first formatted line: the first text
+ * the render tree draws, unless a line break or other text comes first.
+ * Returns whether the search is over.
+ */
+function hideFirstLetter(nodes: RenderNode[], verdict: Verdict): boolean {
+  for (const [index, node] of nodes.entries()) {
+    if (node.kind === 'break') return true;
+    if (node.kind === 'box') {
+      if (hideFirstLetter(node.children, verdict)) return true;
+      continue;
+    }
+    if (node.hidden !== null || node.text.trim() === '') continue;
+    const match = FIRST_LETTER.exec(node.text);
+    if (match === null) return true;
+    const [letter] = match;
+    nodes.splice(
+      index,
+      1,
+      { ...node, text: letter, hidden: verdict },
+      { ...node, text: node.text.slice(letter.length) },
+    );
+    return true;
+  }
+  return false;
+}
+
 const isElement = (node: AnyNode): node is Element =>
   node.type === 'tag' || node.type === 'script' || node.type === 'style';
 
@@ -324,16 +364,29 @@ class Extractor {
         if (isElement(node) === false) continue;
         const style = this.engine.style(node, world);
         if (style.display.kind === 'none') continue;
-        const container = this.paintsUnder(node, style, world);
-        if (container !== null) {
-          const { backgroundColor: color } = style;
+        const register = (container: Element | null, painter: Style): void => {
+          if (container === null) return;
+          const { backgroundColor: color } = painter;
           const paint =
-            style.backgroundImage || color === null
+            painter.backgroundImage || color === null
               ? null
-              : { ...color, a: color.a * style.opacity };
+              : { ...color, a: color.a * painter.opacity };
           const list = painters.get(container);
           if (list === undefined) painters.set(container, [paint]);
           else list.push(paint);
+        };
+        register(this.paintsUnder(node, style, world, false), style);
+        // A positioned ::before or ::after is the usual overlay behind a hero's text.
+        if (node.namespace === HTML_NAMESPACE && own(NO_PSEUDO, node.name) !== true) {
+          for (const which of ['before', 'after'] as const) {
+            const generated = this.engine.pseudoStyle(node, which, world);
+            if (
+              generated !== null &&
+              generated.content !== null &&
+              generated.display.kind !== 'none'
+            )
+              register(this.paintsUnder(node, generated, world, true), generated);
+          }
         }
         visit(node.children);
       }
@@ -342,12 +395,21 @@ class Extractor {
     return painters;
   }
 
-  /** The element whose content a box may paint a background under, or `null`. */
-  private paintsUnder(element: Element, style: Style, world: World): Element | null {
+  /**
+   * The element whose content a box may paint a background under, or `null`.
+   * For a `::before` or `::after` box, `element` is its originating element.
+   */
+  private paintsUnder(
+    element: Element,
+    style: Style,
+    world: World,
+    pseudo: boolean,
+  ): Element | null {
     const color = style.backgroundColor;
     if (style.backgroundClipText || style.visibility !== 'visible') return null;
     if (style.backgroundImage === false && color !== null && color.a === 0) return null;
     if (
+      pseudo === false &&
       element.namespace === HTML_NAMESPACE &&
       (element.name === 'col' || element.name === 'colgroup')
     ) {
@@ -371,7 +433,8 @@ class Extractor {
       large(style.height, style.top, style.bottom, this.viewport.height) === false
     )
       return null;
-    for (let node = element.parent; node !== null && isElement(node); node = node.parent) {
+    const start = pseudo ? element : element.parent;
+    for (let node = start; node !== null && isElement(node); node = node.parent) {
       const ancestor = this.engine.style(node, world);
       const containsFixed =
         ancestor.transform.length > 0 || ancestor.perspective !== null || ancestor.contain.paint;
@@ -767,10 +830,10 @@ class Extractor {
   private element(element: Element, parentFrames: Frame[], scope: Scope): RenderNode {
     const styles = this.worlds.map((world) => this.engine.style(element, world));
     const style = styles[0] as Style;
-    const frames = this.worlds.map((world) =>
+    const ownFrames = this.worlds.map((world) =>
       this.enter(element, styles[world] as Style, parentFrames[world] as Frame, scope, world),
     );
-    const first = frames[0] as Frame;
+    const first = ownFrames[0] as Frame;
     const boxless = first.subtree !== null && BOXLESS[first.subtree.reason] === true;
     const layout: Layout = boxless ? 'inline' : this.layoutOf(element, style, scope);
 
@@ -801,6 +864,14 @@ class Extractor {
         );
       }
     }
+
+    // Without layout, a block's first formatted line may hold all of its text.
+    const container = first.subtree === null && isBlockContainer(style, scope.flexItem);
+    const line = container ? this.startVerdict(element, ownFrames, scope, 'first-line') : null;
+    const frames =
+      line === null
+        ? ownFrames
+        : ownFrames.map((frame) => (frame.subtree === null ? { ...frame, subtree: line } : frame));
 
     const hideChildren = (reason: HiddenReason, detail: string): Frame[] => {
       const verdict = this.verdict(reason, element, detail);
@@ -844,7 +915,34 @@ class Extractor {
       if (before !== null) children.unshift(before);
       if (after !== null) children.push(after);
     }
+    const letter = container ? this.startVerdict(element, frames, scope, 'first-letter') : null;
+    if (letter !== null) hideFirstLetter(children, letter);
     return { kind: 'box', layout, children };
+  }
+
+  /**
+   * The verdict `::first-line` or `::first-letter` styles give a block's text,
+   * when they hide text the block's own styles show.
+   */
+  private startVerdict(
+    element: Element,
+    frames: Frame[],
+    scope: Scope,
+    which: 'first-line' | 'first-letter',
+  ): Verdict | null {
+    if (element.namespace !== HTML_NAMESPACE || this.textVerdict(frames, scope) !== null)
+      return null;
+    const styles = this.worlds.map((world) => this.engine.pseudoStyle(element, which, world));
+    if (styles.every((pseudoStyle) => pseudoStyle === null)) return null;
+    const selector = `${this.selectorOf(element)}::${which}`;
+    const pseudoFrames = this.worlds.map((world) => {
+      const pseudoStyle = styles[world];
+      const frame = frames[world] as Frame;
+      return pseudoStyle === null || pseudoStyle === undefined
+        ? frame
+        : this.enter(element, pseudoStyle, frame, scope, world, selector);
+    });
+    return this.textVerdict(pseudoFrames, scope);
   }
 
   /**

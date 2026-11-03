@@ -123,6 +123,11 @@ finding.
 | Opacity | `opacity: 0.01`, `filter: opacity(0)` | yes | yes | `opacity` | [#5][i5] |
 | Tiny text | `font-size: 0`, `font: 0/0 a`, `zoom: 0.01`, `transform: scale(0)` | yes | yes | `font-size` | [#5][i5] |
 | Fill-forwards animations | `animation: fade 0s forwards` ending at `opacity: 0` | yes | yes | as the property | [#5][i5] |
+| The start of a block | `::first-line { font-size: 0 }`, `::first-letter { color: transparent }` | approx. | yes | as the property | [#8][i8] |
+
+Static mode cannot tell where a block's first line ends, so when `::first-line`
+styles hide text, it reports every line of the block. `::first-letter` hides the
+first letter and the punctuation around it, as a browser does.
 
 The cascade is computed the way browsers compute it, because the attacker writes
 the CSS: selectors of any kind, `!important`, cascade layers, nesting, custom

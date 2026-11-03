@@ -78,6 +78,9 @@ export interface StyleOptions {
 }
 
 export type World = 0 | 1;
+
+/** Pseudo-elements whose styles decide what text renders and how. */
+export type PseudoElement = 'before' | 'after' | 'first-line' | 'first-letter';
 export type Length = number | 'auto' | 'unknown';
 
 /** A transform function with its arguments resolved: lengths in px, angles in degrees. */
@@ -163,8 +166,8 @@ export interface StyleEngine {
   readonly warnings: readonly Warning[];
   readonly quirks: boolean;
   style(element: Element, world: World): Style;
-  /** The styles of `::before` or `::after`, or `null` when no rule targets it. */
-  pseudoStyle(element: Element, which: 'before' | 'after', world: World): Style | null;
+  /** The styles of a pseudo-element, or `null` when no rule targets it. */
+  pseudoStyle(element: Element, which: PseudoElement, world: World): Style | null;
   /** A length context for resolving lengths against an element's styles. */
   context(element: Element, world: World): Context;
 }
@@ -401,7 +404,12 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   const root = new Layer(null);
   const index = new Map<string, Entry[]>();
-  const pseudoIndex = { before: new Map<string, Entry[]>(), after: new Map<string, Entry[]>() };
+  const pseudoIndex: Record<PseudoElement, Map<string, Entry[]>> = {
+    before: new Map(),
+    after: new Map(),
+    'first-line': new Map(),
+    'first-letter': new Map(),
+  };
   const keyframes = new Map<string, Defined<Keyframe[]>[]>();
   const registered = new Map<string, Defined<Registration>[]>();
   const parsedSheets = new Map<string, Rule[]>();
@@ -460,8 +468,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       const target =
         pseudoElement === null
           ? index
-          : pseudoElement === 'before' || pseudoElement === 'after'
-            ? pseudoIndex[pseudoElement]
+          : Object.hasOwn(pseudoIndex, pseudoElement)
+            ? pseudoIndex[pseudoElement as PseudoElement]
             : null;
       if (target === null) continue;
       const list = target.get(selector.bucket);
@@ -886,7 +894,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   const pseudoMatches = (
     element: Element,
-    which: 'before' | 'after',
+    which: PseudoElement,
   ): { block: Block; specificity: Specificity }[] =>
     pseudoIndex[which].size === 0 ? [] : lookup(element, pseudoIndex[which]);
 
@@ -1178,12 +1186,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
   };
 
   const pseudoCache = new Map<string, Map<Element, Computed | null>>();
-  /** The styles of `::before` or `::after`, which inherit from their element. */
-  const computePseudo = (
-    element: Element,
-    which: 'before' | 'after',
-    world: World,
-  ): Computed | null => {
+  /** The styles of a pseudo-element, which inherit from their element. */
+  const computePseudo = (element: Element, which: PseudoElement, world: World): Computed | null => {
     const key = `${which}${world}`;
     let cache = pseudoCache.get(key);
     if (cache === undefined) {
@@ -1196,7 +1200,14 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     const computed =
       matched.length === 0
         ? null
-        : computeStyle(element, compute(element, world), matched, world, false, true);
+        : computeStyle(
+            element,
+            compute(element, world),
+            matched,
+            world,
+            false,
+            which === 'before' || which === 'after',
+          );
     cache.set(element, computed);
     return computed;
   };

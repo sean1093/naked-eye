@@ -634,6 +634,21 @@ export const cases: Case[] = [
     visible: 'plain\n\nicon',
   },
   {
+    name: '::first-line and ::first-letter styles that hide the start of a block',
+    html: '<style>.a::first-line { font-size: 0 } .b::first-line { color: transparent } .c::first-letter { color: transparent } .d::first-line { color: #333; font-weight: bold } .e::first-letter { font-size: 3em }</style><p class="a">tiny first line</p><p class="b">transparent <b>first</b> line</p><p class="c">"Hello," she said</p><p class="d">styled first line</p><p class="e">Drop cap</p>',
+    visible: 'ello," she said\n\nstyled first line\n\nDrop cap',
+    hidden: [
+      ['font-size', 'tiny first line'],
+      ['transparent-text', 'transparent first line'],
+      ['transparent-text', '"H'],
+    ],
+  },
+  {
+    name: 'a positioned ::before overlay is a backdrop',
+    html: '<style>.hero { position: relative } .hero::before { content: ""; position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6) } .hero h1 { position: relative; color: #fff }</style><section class="hero"><h1>overlay title</h1></section>',
+    visible: 'overlay title',
+  },
+  {
     name: 'hidden generated text',
     html: '<style>.a::before { content: "secret "; font-size: 0 } .b::after { content: " hidden"; display: none } .c::before { content: "faded "; opacity: 0 }</style><p class="a">x</p><p class="b">y</p><p class="c">z</p>',
     visible: 'x\n\ny\n\nz',
