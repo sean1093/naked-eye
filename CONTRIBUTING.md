@@ -25,6 +25,15 @@ npm ci
 npm test
 ```
 
+`npm test` runs the shared corpus in static mode. Browser mode runs the same
+corpus only in the engines `NAKED_EYE_BROWSERS` names, so the suite also passes
+on a machine without browsers. To run it in all three:
+
+```sh
+npx playwright install chromium firefox webkit
+NAKED_EYE_BROWSERS=chromium,firefox,webkit npm test
+```
+
 ## Scripts
 
 | Command | What it does |
@@ -102,7 +111,9 @@ CI runs these on every pull request, and all of them must pass before a merge:
 | Bundle size | `npm run size` |
 
 A test matrix then runs the suite and the build on Node.js 20, 22, 24 and 26 on
-Linux, and on Node.js 24 on Windows and macOS.
+Linux, and on Node.js 24 on Windows and macOS, and three `Browser mode` jobs run
+the corpus in Chromium, Firefox and WebKit. `Quality gates` and the three
+browser jobs are required checks on `main`.
 
 Coverage thresholds are 90% for lines, functions and statements and 85% for
 branches. Raise them when you can; never lower them to get a change through.
