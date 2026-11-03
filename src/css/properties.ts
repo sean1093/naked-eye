@@ -78,6 +78,10 @@ export interface Values {
   'animation-iteration-count': (number | 'infinite')[];
   'animation-direction': string[];
   'animation-play-state': string[];
+  /** Size containment sizes a box as if it were empty; paint containment clips to it. */
+  contain: { size: boolean; paint: boolean };
+  /** Whether `contain-intrinsic-*` gives the box a block size other than nothing. */
+  'contain-intrinsic-height': boolean;
 }
 
 export type Longhand = keyof Values;
@@ -301,30 +305,60 @@ function parseFont(nodes: ComponentValue[]): { 'font-size': FontSize } | null {
   return { 'font-size': size };
 }
 
-const TRANSFORM_FUNCTIONS: Record<string, true> = {
-  matrix: true,
-  matrix3d: true,
-  translate: true,
-  translatex: true,
-  translatey: true,
-  translatez: true,
-  translate3d: true,
-  scale: true,
-  scalex: true,
-  scaley: true,
-  scalez: true,
-  scale3d: true,
-  rotate: true,
-  rotatex: true,
-  rotatey: true,
-  rotatez: true,
-  rotate3d: true,
-  skew: true,
-  skewx: true,
-  skewy: true,
-  perspective: true,
+/** Argument kinds per transform function: `L` length, `P` length-percentage, `N` number or percentage, `A` angle, `#` plain number. */
+const TRANSFORM_FUNCTIONS: Record<string, string[]> = {
+  matrix: ['######'],
+  matrix3d: ['################'],
+  translate: ['P', 'PP'],
+  translatex: ['P'],
+  translatey: ['P'],
+  translatez: ['L'],
+  translate3d: ['PPL'],
+  scale: ['N', 'NN'],
+  scalex: ['N'],
+  scaley: ['N'],
+  scalez: ['N'],
+  scale3d: ['NNN'],
+  rotate: ['A'],
+  rotatex: ['A'],
+  rotatey: ['A'],
+  rotatez: ['A'],
+  rotate3d: ['###A'],
+  skew: ['A', 'AA'],
+  skewx: ['A'],
+  skewy: ['A'],
+  perspective: ['L'],
 };
 
+function transformArgument(node: ComponentValue, kind: string): Expr | null {
+  switch (kind) {
+    case 'L': {
+      if (identOf(node) === 'none') return ZERO;
+      const expr = lengthPercentage(node, false);
+      return expr !== null && !(expr.op === 'value' && expr.unit === '%') ? expr : null;
+    }
+    case 'P':
+      return lengthPercentage(node, false);
+    case 'N':
+      return numberOrPercentage(node);
+    case 'A':
+      return angle(node);
+    default: {
+      const expr = parseNumeric(node);
+      return expr !== null &&
+        kindOf(expr, 'number') === 'number' &&
+        !(expr.op === 'value' && expr.unit === '%')
+        ? expr
+        : null;
+    }
+  }
+}
+
+/**
+ * A transform list. Arguments are comma-separated and checked against each
+ * function's grammar: `scale(1 1)` is rejected by browsers, and accepting it
+ * would mask an earlier `scale(0)`.
+ */
 function parseTransform(nodes: ComponentValue[]): TransformFunction[] | null {
   if (identOf(single(nodes) ?? undefined) === 'none') return [];
   if (nodes.length === 0) return null;
@@ -332,16 +366,16 @@ function parseTransform(nodes: ComponentValue[]): TransformFunction[] | null {
   for (const node of nodes) {
     if (!isFunctionNode(node)) return null;
     const name = node.getName().toLowerCase();
-    if (TRANSFORM_FUNCTIONS[name] !== true) return null;
-    const args: Expr[] = [];
-    for (const part of splitCommas(node.value)) {
-      for (const value of significant(part)) {
-        const expr = parseNumeric(value) ?? (identOf(value) === 'none' ? ZERO : null);
-        if (expr === null) return null;
-        args.push(expr);
-      }
-    }
-    functions.push({ name, args });
+    const forms = own(TRANSFORM_FUNCTIONS, name);
+    if (forms === undefined) return null;
+    const parts = splitCommas(node.value).map(significant);
+    const form = forms.find((candidate) => candidate.length === parts.length);
+    if (form === undefined || parts.some((part) => part.length !== 1)) return null;
+    const args = parts.map((part, index) =>
+      transformArgument(part[0] as ComponentValue, form[index] as string),
+    );
+    if (args.includes(null)) return null;
+    functions.push({ name, args: args as Expr[] });
   }
   return functions;
 }
@@ -545,7 +579,9 @@ function parseWhiteSpace(nodes: ComponentValue[]): Partial<Values> | null {
       return null;
     }
   }
-  return nodes.length === 0 ? null : result;
+  if (nodes.length === 0) return null;
+  // A shorthand sets every longhand: the ones not given return to their initial values.
+  return { 'white-space-collapse': 'collapse', 'text-wrap-mode': 'wrap', ...result };
 }
 
 const FILL_MODES = ['none', 'forwards', 'backwards', 'both'];
@@ -721,7 +757,17 @@ export const LONGHANDS: Definitions = {
   'white-space-collapse': {
     inherited: true,
     initial: 'collapse',
-    parse: (nodes) => parseWhiteSpace(nodes)?.['white-space-collapse'] ?? null,
+    parse: (nodes) => {
+      const word = identOf(single(nodes) ?? undefined);
+      if (word === 'discard') return 'collapse';
+      return keyword([
+        'collapse',
+        'preserve',
+        'preserve-breaks',
+        'preserve-spaces',
+        'break-spaces',
+      ] as const)(nodes);
+    },
   },
   'text-wrap-mode': {
     inherited: true,
@@ -756,7 +802,36 @@ export const LONGHANDS: Definitions = {
     initial: ['running'],
     parse: listKeyword(PLAY_STATES),
   },
+  contain: { inherited: false, initial: { size: false, paint: false }, parse: parseContain },
+  'contain-intrinsic-height': { inherited: false, initial: false, parse: parseIntrinsicSize },
 };
+
+const CONTAINMENT = ['size', 'inline-size', 'layout', 'style', 'paint'];
+
+function parseContain(nodes: ComponentValue[]): Values['contain'] | null {
+  const words = nodes.map((node) => identOf(node));
+  if (words.length === 1) {
+    if (words[0] === 'none') return { size: false, paint: false };
+    if (words[0] === 'strict') return { size: true, paint: true };
+    if (words[0] === 'content') return { size: false, paint: true };
+  }
+  if (words.length === 0 || words.some((word) => word === undefined || !CONTAINMENT.includes(word)))
+    return null;
+  if (
+    new Set(words).size !== words.length ||
+    (words.includes('size') && words.includes('inline-size'))
+  )
+    return null;
+  return { size: words.includes('size'), paint: words.includes('paint') };
+}
+
+/** `none`, or `[auto] <length>` for the block axis: anything but `none` gives the box a size. */
+function parseIntrinsicSize(nodes: ComponentValue[]): boolean | null {
+  if (identOf(single(nodes) ?? undefined) === 'none') return false;
+  const lengths = nodes.filter((node) => identOf(node) !== 'auto');
+  if (lengths.length !== 1 || nodes.length - lengths.length > 1) return null;
+  return lengthPercentage(lengths[0], false, true) === null ? null : true;
+}
 
 /** Properties whose unitless lengths are px in quirks mode. */
 const QUIRKY: Record<string, true> = {
@@ -854,9 +929,44 @@ export const SHORTHANDS: Record<
     return nodes.length === 0 ? null : { 'text-wrap-mode': mode ?? 'wrap' };
   },
   animation: (nodes) => parseAnimation(nodes),
+  'contain-intrinsic-size': (nodes) => {
+    // One or two of `none`, `<length>` or `auto <length>`: width, then height.
+    const groups: ComponentValue[][] = [];
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index] as ComponentValue;
+      if (identOf(node) === 'auto' && index + 1 < nodes.length) {
+        groups.push([node, nodes[index + 1] as ComponentValue]);
+        index += 1;
+      } else groups.push([node]);
+    }
+    const sizes = groups.map(parseIntrinsicSize);
+    if (sizes.length === 0 || sizes.length > 2 || sizes.includes(null)) return null;
+    return { 'contain-intrinsic-height': sizes[sizes.length - 1] as boolean };
+  },
 };
 
 export type Parsed = Partial<Values>;
+
+/**
+ * Prefixed and logical names browsers treat as the same property, in the
+ * horizontal, left-to-right writing mode this engine assumes.
+ */
+const ALIASES: Record<string, string> = {
+  '-webkit-filter': 'filter',
+  '-webkit-transform': 'transform',
+  '-webkit-clip-path': 'clip-path',
+  '-webkit-animation': 'animation',
+  '-webkit-animation-name': 'animation-name',
+  '-webkit-animation-fill-mode': 'animation-fill-mode',
+  '-webkit-animation-iteration-count': 'animation-iteration-count',
+  '-webkit-animation-direction': 'animation-direction',
+  '-webkit-animation-play-state': 'animation-play-state',
+  'inline-size': 'width',
+  'block-size': 'height',
+  'max-inline-size': 'max-width',
+  'max-block-size': 'max-height',
+  'contain-intrinsic-block-size': 'contain-intrinsic-height',
+};
 
 /**
  * Parses a declaration of a modeled property into longhand values, or
@@ -868,28 +978,31 @@ export function parseProperty(
   value: ComponentValue[],
   quirks: boolean,
 ): Parsed | null {
+  const property = own(ALIASES, name) ?? name;
   const nodes = significant(value);
   if (nodes.some((node) => isSimpleBlockNode(node) && node.startToken[0] === TokenType.OpenCurly))
     return null;
-  const longhand = own(LONGHANDS as unknown as Record<string, Definition<Longhand>>, name);
+  const longhand = own(LONGHANDS as unknown as Record<string, Definition<Longhand>>, property);
   if (longhand !== undefined) {
-    const parsed = longhand.parse(nodes, quirks && QUIRKY[name] === true);
-    return parsed === null ? null : ({ [name]: parsed } as Parsed);
+    const parsed = longhand.parse(nodes, quirks && QUIRKY[property] === true);
+    return parsed === null ? null : ({ [property]: parsed } as Parsed);
   }
-  const shorthand = own(SHORTHANDS, name);
+  const shorthand = own(SHORTHANDS, property);
   if (shorthand === undefined) return null;
   const parsed = shorthand(nodes, quirks);
   if (parsed === null || Object.values(parsed).some((part) => part === null)) return null;
   return parsed;
 }
 
-/** Whether a property is one this engine models (as a longhand or a shorthand). */
+/** Whether a property is one this engine models (as a longhand, a shorthand or an alias). */
 export function isModeled(name: string): boolean {
-  return Object.hasOwn(LONGHANDS, name) || Object.hasOwn(SHORTHANDS, name);
+  const property = own(ALIASES, name) ?? name;
+  return Object.hasOwn(LONGHANDS, property) || Object.hasOwn(SHORTHANDS, property);
 }
 
 /** The longhands a modeled property sets. */
-export function longhandsOf(name: string): Longhand[] {
+export function longhandsOf(alias: string): Longhand[] {
+  const name = own(ALIASES, alias) ?? alias;
   if (Object.hasOwn(LONGHANDS, name)) return [name as Longhand];
   switch (name) {
     case 'font':
@@ -922,6 +1035,8 @@ export function longhandsOf(name: string): Longhand[] {
       return ['white-space-collapse', 'text-wrap-mode'];
     case 'text-wrap':
       return ['text-wrap-mode'];
+    case 'contain-intrinsic-size':
+      return ['contain-intrinsic-height'];
     case 'animation':
       return [
         'animation-name',

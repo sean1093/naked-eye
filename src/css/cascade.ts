@@ -44,6 +44,7 @@ import {
   type CompiledSelector,
   compareSpecificity,
   compileSelectorList,
+  type Nesting,
   type Specificity,
 } from './selectors.js';
 import { hasSubstitution, type SubstitutionContext, substitute } from './substitute.js';
@@ -118,6 +119,9 @@ export interface Style {
   textIndent: Length;
   whiteSpaceCollapse: Values['white-space-collapse'];
   textWrapMode: Values['text-wrap-mode'];
+  contain: Values['contain'];
+  /** A `contain-intrinsic-*` block size, which keeps a size-contained box from collapsing. */
+  intrinsicHeight: boolean;
 }
 
 export interface StyleEngine {
@@ -188,15 +192,56 @@ interface Registration {
   initial: ComponentValue[] | null;
 }
 
+/**
+ * The enclosing style rule, for nesting. Nested selectors refer to it through
+ * a private pseudo-class instead of a copy of its text, so each level costs
+ * the same however deep the nesting goes.
+ */
+interface ParentRef {
+  name: string;
+  selectors: CompiledSelector[];
+  nesting: Nesting;
+}
+
 interface SheetContext {
   layer: Layer;
   conditional: boolean;
-  /** The resolved selector list of the enclosing style rule, for nesting. */
-  parent: string | null;
+  parent: ParentRef | null;
   origin: 'ua' | 'author';
+  /** `@namespace` prefixes declared by the style sheet. */
+  namespaces: Record<string, string>;
+}
+
+/** A definition that only exists in the second world when declared under an undecidable condition. */
+interface Defined<T> {
+  value: T;
+  conditional: boolean;
+}
+
+/** The last definition that exists in a world. */
+function latest<T>(definitions: readonly Defined<T>[] | undefined, world: World): T | undefined {
+  if (definitions === undefined) return undefined;
+  for (let index = definitions.length - 1; index >= 0; index -= 1) {
+    const definition = definitions[index] as Defined<T>;
+    if (world === 1 || !definition.conditional) return definition.value;
+  }
+  return undefined;
+}
+
+function define<T>(
+  map: Map<string, Defined<T>[]>,
+  name: string,
+  value: T,
+  conditional: boolean,
+): void {
+  const list = map.get(name);
+  if (list === undefined) map.set(name, [{ value, conditional }]);
+  else list.push({ value, conditional });
 }
 
 const MAX_IMPORT_DEPTH = 8;
+/** Style sheets applied through `@import` per document; each URL is parsed once. */
+const MAX_IMPORTS = 128;
 
 /** Serializes a selector, replacing each nesting selector `&` with `replacement`. */
 function serializeNesting(
@@ -220,14 +265,15 @@ function serializeNesting(
   return [walk(values), found];
 }
 
-function resolveSelector(prelude: readonly ComponentValue[], parent: string | null): string {
+/** A nested selector list made absolute: `&` and the implicit descendant refer to the parent. */
+function resolveSelector(prelude: readonly ComponentValue[], parent: ParentRef | null): string {
   return splitCommas(prelude)
     .map((part) => {
       const [text, nested] = serializeNesting(
         trim(part),
-        parent === null ? ':scope' : `:is(${parent})`,
+        parent === null ? ':scope' : `:${parent.name}`,
       );
-      return parent === null || nested ? text : `:is(${parent}) ${text}`;
+      return parent === null || nested ? text : `:${parent.name} ${text}`;
     })
     .join(', ');
 }
@@ -267,6 +313,8 @@ const INITIAL_STYLE: Style = {
   textIndent: 0,
   whiteSpaceCollapse: 'collapse',
   textWrapMode: 'wrap',
+  contain: { size: false, paint: false },
+  intrinsicHeight: false,
 };
 
 function elementChildren(node: { children: AnyNode[] }): Element[] {
@@ -290,8 +338,10 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
 
   const root = new Layer(null);
   const index = new Map<string, Entry[]>();
-  const keyframes = new Map<string, Keyframe[]>();
-  const registered = new Map<string, Registration>();
+  const keyframes = new Map<string, Defined<Keyframe[]>[]>();
+  const registered = new Map<string, Defined<Registration>[]>();
+  const parsedSheets = new Map<string, Rule[]>();
+  let imports = 0;
   let order = 0;
   let conditionalRules = false;
 
@@ -399,34 +449,64 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     return ctx;
   };
 
+  let parents = 0;
+  const parentRef = (selectors: CompiledSelector[], outer: ParentRef | null): ParentRef => {
+    const own = selectors.filter((selector) => selector.pseudoElement === null);
+    const name = `-ne-parent-${parents++}`;
+    const specificity = own.reduce<Specificity>(
+      (best, selector) =>
+        compareSpecificity(selector.specificity, best) > 0 ? selector.specificity : best,
+      [0, 0, 0],
+    );
+    const test = (element: Element): boolean => own.some((selector) => selector.test(element));
+    return { name, selectors, nesting: { ...outer?.nesting, [name]: { test, specificity } } };
+  };
+
+  const compileRule = (
+    prelude: readonly ComponentValue[],
+    ctx: SheetContext,
+  ): CompiledSelector[] | null => {
+    const compiled = compileSelectorList(
+      resolveSelector(prelude, ctx.parent),
+      quirks,
+      ctx.parent?.nesting ?? {},
+      ctx.namespaces,
+    );
+    if ('selectors' in compiled) return compiled.selectors;
+    if (!compiled.syntax)
+      warn('unsupported-selector', `Unsupported selector skipped: ${serialize(prelude).trim()}`);
+    return null;
+  };
+
   const groupContents = (block: ComponentValue[], ctx: SheetContext): void => {
     if (ctx.parent === null) {
       for (const rule of parseRuleList(block, false)) processRule(rule, ctx);
       return;
     }
-    processItems(parseBlockContents(block), ctx.parent, ctx);
+    processItems(parseBlockContents(block), ctx.parent.selectors, ctx);
   };
 
-  const processItems = (items: BlockItem[], selectorText: string, ctx: SheetContext): void => {
-    const compiled = compileSelectorList(selectorText, quirks);
-    if (!('selectors' in compiled)) return;
+  /** Declarations apply to `selectors`; nested rules resolve against them. */
+  const processItems = (
+    items: BlockItem[],
+    selectors: CompiledSelector[],
+    ctx: SheetContext,
+  ): void => {
+    let parent: ParentRef | null = null;
     for (const item of items) {
-      if (item.kind === 'declarations')
-        addBlock(compiled.selectors, toDeclarations(item.declarations), ctx);
-      else processRule(item.rule, { ...ctx, parent: selectorText });
+      if (item.kind === 'declarations') {
+        addBlock(selectors, toDeclarations(item.declarations), ctx);
+        continue;
+      }
+      parent ??= parentRef(selectors, ctx.parent);
+      processRule(item.rule, { ...ctx, parent });
     }
   };
 
   const processRule = (rule: Rule, ctx: SheetContext): void => {
     if (rule.kind === 'style') {
-      const selectorText = resolveSelector(rule.prelude, ctx.parent);
-      const compiled = compileSelectorList(selectorText, quirks);
-      if (!('selectors' in compiled)) {
-        if (!compiled.syntax)
-          warn('unsupported-selector', `Unsupported selector skipped: ${selectorText}`);
-        return;
-      }
-      processItems(rule.items, selectorText, ctx);
+      const selectors = compileRule(rule.prelude, ctx);
+      if (selectors !== null) processItems(rule.items, selectors, ctx);
       return;
     }
     const { name, prelude, block } = rule;
@@ -450,24 +530,17 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
         return;
       }
       case 'scope': {
+        // Approximated as nesting under the scope root, ignoring the lower
+        // bound; the rules only apply in the second world.
         if (block === null) return;
         const next = condition('unknown', ctx, '@scope') as SheetContext;
         const start = significant(prelude)[0];
-        const rootSelector =
-          start !== undefined && 'startToken' in start ? serialize(start.value) : null;
-        const scoped =
-          rootSelector === null
-            ? next
-            : {
-                ...next,
-                parent:
-                  next.parent === null ? rootSelector : `:is(${next.parent}) :is(${rootSelector})`,
-              };
-        if (scoped.parent === null) {
-          for (const inner of parseRuleList(block, false)) processRule(inner, scoped);
-        } else {
-          processItems(parseBlockContents(block), scoped.parent, scoped);
-        }
+        const roots =
+          start !== undefined && 'startToken' in start ? compileRule(start.value, next) : null;
+        if (roots !== null) processItems(parseBlockContents(block), roots, next);
+        else if (next.parent !== null)
+          processItems(parseBlockContents(block), next.parent.selectors, next);
+        else for (const inner of parseRuleList(block, false)) processRule(inner, next);
         return;
       }
       case 'layer': {
@@ -499,7 +572,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
           );
           frames.push({ offsets, declarations });
         }
-        keyframes.set(keyframeName, frames);
+        define(keyframes, keyframeName, frames, ctx.conditional);
         return;
       }
       case 'property': {
@@ -516,10 +589,12 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
           return;
         const initial = descriptors.get('initial-value');
         if (initial === undefined && syntax[4].value.trim() !== '*') return;
-        registered.set(property, {
-          inherits: inherits === 'true',
-          initial: initial === undefined ? null : trim(initial),
-        });
+        define(
+          registered,
+          property,
+          { inherits: inherits === 'true', initial: initial === undefined ? null : trim(initial) },
+          ctx.conditional,
+        );
         return;
       }
       default:
@@ -527,11 +602,39 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     }
   };
 
-  const addSheet = (css: string, ctx: SheetContext, depth: number, seen: Set<string>): void => {
+  const sheetRules = (url: string, css: string): Rule[] => {
+    let rules = parsedSheets.get(url);
+    if (rules === undefined) {
+      rules = parseStylesheet(css);
+      parsedSheets.set(url, rules);
+    }
+    return rules;
+  };
+
+  const addSheet = (
+    rules: Rule[],
+    parent: SheetContext,
+    depth: number,
+    seen: Set<string>,
+  ): void => {
+    const ctx: SheetContext = { ...parent, namespaces: {} };
     let importsAllowed = true;
-    for (const rule of parseStylesheet(css)) {
+    for (const rule of rules) {
       if (rule.kind === 'at' && rule.name === 'import') {
         if (importsAllowed) addImport(rule.prelude, ctx, depth, seen);
+        continue;
+      }
+      if (rule.kind === 'at' && rule.name === 'namespace') {
+        const nodes = significant(rule.prelude);
+        const prefix = nodes.length === 2 ? identOf(nodes[0]) : undefined;
+        const target = nodes[nodes.length - 1];
+        const url =
+          stringOf(target) ??
+          (target !== undefined && isFunctionNode(target)
+            ? stringOf(significant(target.value)[0])
+            : undefined);
+        if (prefix !== undefined && url !== undefined) ctx.namespaces[prefix] = url;
+        importsAllowed = false;
         continue;
       }
       if (
@@ -606,13 +709,21 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       return;
     }
     if (depth >= MAX_IMPORT_DEPTH || seen.has(url)) return;
-    addSheet(css, next, depth + 1, new Set([...seen, url]));
+    imports += 1;
+    if (imports > MAX_IMPORTS) {
+      warn(
+        'unresolved-stylesheet',
+        `@import of ${url} was not applied: the document imports more than ${MAX_IMPORTS} style sheets`,
+      );
+      return;
+    }
+    addSheet(sheetRules(url, css), next, depth + 1, new Set([...seen, url]));
   };
 
   // User-agent sheet, then every author sheet in tree order.
   addSheet(
-    UA_STYLESHEET,
-    { layer: root, conditional: false, parent: null, origin: 'ua' },
+    parseStylesheet(UA_STYLESHEET),
+    { layer: root, conditional: false, parent: null, origin: 'ua', namespaces: {} },
     0,
     new Set(),
   );
@@ -621,6 +732,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     conditional: false,
     parent: null,
     origin: 'author',
+    namespaces: {},
   };
   const stack: AnyNode[] = [...document.children].reverse();
   while (stack.length > 0) {
@@ -639,7 +751,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
         const css = node.children
           .map((child) => (child.type === 'text' ? child.data : ''))
           .join('');
-        if (media !== null) addSheet(css, media, 0, new Set());
+        if (media !== null) addSheet(parseStylesheet(css), media, 0, new Set());
       }
     } else if (node.name === 'link') {
       const rel = (attributes.rel ?? '').toLowerCase().split(/[\t\n\f\r ]+/);
@@ -661,7 +773,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
             'unresolved-stylesheet',
             `<link rel="stylesheet" href="${href}"> was not applied: its CSS was not supplied`,
           );
-        else if (media !== null) addSheet(css, media, 1, new Set([href]));
+        else if (media !== null) addSheet(sheetRules(href, css), media, 1, new Set([href]));
       }
     }
     stack.push(...[...node.children].reverse());
@@ -823,17 +935,33 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     element,
   });
 
+  const registrationCache: (Map<string, Registration> | undefined)[] = [];
+  const registrations = (world: World): Map<string, Registration> => {
+    let found = registrationCache[world];
+    if (found === undefined) {
+      found = new Map();
+      for (const name of registered.keys()) {
+        const registration = latest(registered.get(name), world);
+        if (registration !== undefined) found.set(name, registration);
+      }
+      registrationCache[world] = found;
+    }
+    return found;
+  };
+
   const computeCustom = (
     element: Element,
     byProperty: Map<string, Candidate[]>,
     parent: Map<string, ComponentValue[] | null> | null,
+    world: World,
   ): Map<string, ComponentValue[] | null> => {
     const declared = [...byProperty.keys()].filter((name) => name.startsWith('--'));
-    const nonInherited = [...registered].filter(([, registration]) => !registration.inherits);
+    const active = registrations(world);
+    const nonInherited = [...active].filter(([, registration]) => !registration.inherits);
     if (declared.length === 0 && nonInherited.length === 0 && parent !== null) return parent;
     const result = new Map(parent ?? []);
     for (const [name, registration] of nonInherited) result.set(name, registration.initial);
-    for (const [name, registration] of registered) {
+    for (const [name, registration] of active) {
       if (!result.has(name)) result.set(name, registration.initial);
     }
     const resolving = new Set<string>();
@@ -845,7 +973,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
       if (resolving.has(name)) return null;
       resolving.add(name);
       let value: ComponentValue[] | null;
-      const registration = registered.get(name);
+      const registration = active.get(name);
       const inherited = parent?.get(name) ?? registration?.initial ?? null;
       if (decl.wide === 'initial') value = registration?.initial ?? null;
       else if (decl.wide === 'inherit') value = inherited;
@@ -889,6 +1017,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     element: Element,
     byProperty: Map<string, Candidate[]>,
     custom: Map<string, ComponentValue[] | null>,
+    world: World,
   ): Candidate[][] => {
     const read = <K extends Longhand>(property: K): Values[K] => {
       const decl = winner(byProperty.get(property));
@@ -905,7 +1034,7 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     const out: Candidate[][] = [];
     names.forEach((name, position) => {
       if (name === null || name === '') return;
-      const frames = keyframes.get(name);
+      const frames = latest(keyframes.get(name), world);
       if (frames === undefined) return;
       const pick = <T>(list: T[]): T => list[position % list.length] as T;
       const fill = pick(fills);
@@ -958,9 +1087,9 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     const parent = parentElement === null ? null : compute(parentElement, world);
     const parentStyle = parent?.style ?? INITIAL_STYLE;
     const byProperty = candidatesFor(matches(element), world);
-    const custom = computeCustom(element, byProperty, parent?.custom ?? null);
+    const custom = computeCustom(element, byProperty, parent?.custom ?? null, world);
 
-    for (const animation of animationBlocks(element, byProperty, custom)) {
+    for (const animation of animationBlocks(element, byProperty, custom, world)) {
       for (const candidate of animation) {
         const list = byProperty.get(candidate.decl.property);
         if (list === undefined) byProperty.set(candidate.decl.property, [candidate]);
@@ -1155,6 +1284,8 @@ export function createStyleEngine(document: Document, options: StyleOptions): St
     style.marginLeft = offset('margin-left', 0, parentStyle.marginLeft);
     style.marginTop = offset('margin-top', 0, parentStyle.marginTop);
     style.textIndent = offset('text-indent', 0, parentStyle.textIndent);
+    style.contain = plain('contain', parentStyle.contain, INITIAL_STYLE.contain);
+    style.intrinsicHeight = plain('contain-intrinsic-height', parentStyle.intrinsicHeight, false);
 
     const computed: Computed = { style, custom };
     cache.set(element, computed);

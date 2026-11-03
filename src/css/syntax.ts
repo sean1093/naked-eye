@@ -48,8 +48,43 @@ export type BlockItem =
   | { kind: 'declarations'; declarations: Declaration[] }
   | { kind: 'rule'; rule: Rule };
 
+/**
+ * Blocks nested deeper than this are cut short. The component-value parser
+ * throws past 512 levels; cutting at the token level instead keeps the rest of
+ * the style sheet, as a browser keeps the rest when it drops one declaration.
+ */
+const MAX_NESTING = 256;
+
+const OPENERS: Partial<Record<TokenType, true>> = {
+  [TokenType.OpenParen]: true,
+  [TokenType.OpenSquare]: true,
+  [TokenType.OpenCurly]: true,
+  [TokenType.Function]: true,
+};
+const CLOSERS: Partial<Record<TokenType, true>> = {
+  [TokenType.CloseParen]: true,
+  [TokenType.CloseSquare]: true,
+  [TokenType.CloseCurly]: true,
+};
+
+/** Tokenizes and parses into component values, dropping whatever nests deeper than MAX_NESTING. */
 export function parseComponentValues(css: string): ComponentValue[] {
-  return parseListOfComponentValues(tokenize({ css }));
+  const tokens: CSSToken[] = [];
+  let depth = 0;
+  for (const token of tokenize({ css })) {
+    const type = token[0];
+    if (OPENERS[type] === true) {
+      depth += 1;
+      if (depth > MAX_NESTING) continue;
+    } else if (CLOSERS[type] === true) {
+      depth = Math.max(0, depth - 1);
+      if (depth >= MAX_NESTING) continue;
+    } else if (depth > MAX_NESTING) {
+      continue;
+    }
+    tokens.push(token);
+  }
+  return parseListOfComponentValues(tokens);
 }
 
 /** Parses a style sheet into its top-level rules. */

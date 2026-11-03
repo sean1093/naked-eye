@@ -6,6 +6,7 @@
 import { compile, type Options } from 'css-select';
 import { type AttributeSelector, parse, type Selector, SelectorType } from 'css-what';
 import type { AnyNode, Element } from 'domhandler';
+import { own } from '../util.js';
 
 export type Specificity = readonly [number, number, number];
 
@@ -140,6 +141,54 @@ function isRequiredEmpty(element: Element): boolean {
   return (attribute(element, 'value') ?? '') === '';
 }
 
+/** The HTML specification's valid e-mail address. */
+const EMAIL =
+  /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+/**
+ * Constraints a control fails as soon as it is parsed, with no interaction:
+ * required and empty, an e-mail or URL that does not parse, a number out of
+ * range or off its step. `pattern` is not evaluated: a hostile pattern could
+ * stall the regular expression engine.
+ */
+function failsConstraints(element: Element): boolean {
+  if (isRequiredEmpty(element)) return true;
+  if (element.name !== 'input') return false;
+  const type = (attribute(element, 'type') ?? 'text').toLowerCase();
+  const value = (attribute(element, 'value') ?? '').trim();
+  if (value === '') return false;
+  if (type === 'email') {
+    const addresses =
+      attribute(element, 'multiple') === undefined
+        ? [value]
+        : value.split(',').map((part) => part.trim());
+    return addresses.some((address) => !EMAIL.test(address));
+  }
+  if (type === 'url') {
+    try {
+      new URL(value);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  if (type === 'number') {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return false;
+    const min = Number.parseFloat(attribute(element, 'min') ?? '');
+    const max = Number.parseFloat(attribute(element, 'max') ?? '');
+    if (number < min || number > max) return true;
+    const stepAttribute = attribute(element, 'step')?.trim().toLowerCase();
+    if (stepAttribute === 'any') return false;
+    const step = Number.parseFloat(stepAttribute ?? '');
+    const size = Number.isFinite(step) && step > 0 ? step : 1;
+    const base = Number.isFinite(min) ? min : 0;
+    const steps = (number - base) / size;
+    return Math.abs(steps - Math.round(steps)) > 1e-9;
+  }
+  return false;
+}
+
 const CONTROLS: Record<string, true> = {
   input: true,
   select: true,
@@ -150,13 +199,13 @@ const CONTROLS: Record<string, true> = {
 };
 
 function isInvalid(element: Element): boolean {
-  if (CONTROLS[element.name] === true) return isRequiredEmpty(element);
+  if (CONTROLS[element.name] === true) return failsConstraints(element);
   if (element.name !== 'form' && element.name !== 'fieldset') return false;
   const stack: AnyNode[] = [...element.children];
   while (stack.length > 0) {
     const node = stack.pop() as AnyNode;
     if (node.type !== 'tag') continue;
-    if (CONTROLS[node.name] === true && isRequiredEmpty(node)) return true;
+    if (CONTROLS[node.name] === true && failsConstraints(node)) return true;
     stack.push(...node.children);
   }
   return false;
@@ -175,15 +224,102 @@ function inRange(element: Element): boolean | null {
   return !(max !== undefined && value > Number.parseFloat(max));
 }
 
+/** Strong right-to-left letters: Hebrew, Arabic, Syriac, Thaana, NKo and their presentation forms. */
+const RTL = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/u;
+const STRONG = /[\p{L}]/u;
+
+/** `dir=auto` resolves from the first strong character of the text. */
+function autoDirection(element: Element): 'ltr' | 'rtl' {
+  const match = STRONG.exec(textContent(element));
+  return match !== null && RTL.test(match[0]) ? 'rtl' : 'ltr';
+}
+
 function direction(element: Element): 'ltr' | 'rtl' {
   for (let node: Element | null = element; node !== null; ) {
     const dir = attribute(node, 'dir')?.toLowerCase();
-    if (dir === 'rtl') return 'rtl';
-    if (dir === 'ltr' || dir === 'auto') return 'ltr';
+    if (dir === 'rtl' || dir === 'ltr') return dir;
+    if (dir === 'auto') return autoDirection(node);
     node = node.parent?.type === 'tag' ? node.parent : null;
   }
   return 'ltr';
 }
+
+/** Input types whose value the user can edit as text. */
+const TEXT_INPUTS: Record<string, true> = {
+  text: true,
+  search: true,
+  url: true,
+  tel: true,
+  email: true,
+  password: true,
+  date: true,
+  month: true,
+  week: true,
+  time: true,
+  'datetime-local': true,
+  number: true,
+};
+
+function isDisabled(element: Element): boolean {
+  if (attribute(element, 'disabled') !== undefined) return true;
+  for (let node = element.parent; node !== null && node.type === 'tag'; node = node.parent) {
+    if (node.name !== 'fieldset' || attribute(node, 'disabled') === undefined) continue;
+    const legend = node.children.find(
+      (child): child is Element => child.type === 'tag' && child.name === 'legend',
+    );
+    let inLegend = false;
+    for (
+      let up: Element | null = element;
+      up !== null && up !== node;
+      up = up.parent?.type === 'tag' ? up.parent : null
+    ) {
+      if (up === legend) inLegend = true;
+    }
+    if (!inLegend) return true;
+  }
+  return false;
+}
+
+/** `contenteditable` makes an editing host; `false` ends one. */
+function isEditable(element: Element): boolean {
+  for (
+    let node: Element | null = element;
+    node !== null;
+    node = node.parent?.type === 'tag' ? node.parent : null
+  ) {
+    const value = attribute(node, 'contenteditable')?.trim().toLowerCase();
+    if (value === '' || value === 'true' || value === 'plaintext-only') return true;
+    if (value === 'false') return false;
+  }
+  return false;
+}
+
+/** `:read-write`: a mutable text control, or editable content. `:read-only` is everything else. */
+function isReadWrite(element: Element): boolean {
+  if (element.name === 'input') {
+    const type = (attribute(element, 'type') ?? 'text').trim().toLowerCase();
+    const editable = TEXT_INPUTS[type] === true || !Object.hasOwn(INPUT_TYPES, type);
+    return editable && attribute(element, 'readonly') === undefined && !isDisabled(element);
+  }
+  if (element.name === 'textarea')
+    return attribute(element, 'readonly') === undefined && !isDisabled(element);
+  return isEditable(element);
+}
+
+/** Every valid input type; an unknown one falls back to `text`. */
+const INPUT_TYPES: Record<string, true> = {
+  ...TEXT_INPUTS,
+  hidden: true,
+  checkbox: true,
+  radio: true,
+  file: true,
+  submit: true,
+  image: true,
+  reset: true,
+  button: true,
+  range: true,
+  color: true,
+};
 
 /**
  * Pseudo-classes css-select does not know, decided for a page as it is first
@@ -211,6 +347,8 @@ const PSEUDOS: Options<AnyNode, Element>['pseudos'] = {
     !isInvalid(element),
   'in-range': (element: Element) => inRange(element) === true,
   'out-of-range': (element: Element) => inRange(element) === false,
+  '-ne-read-write': (element: Element) => isReadWrite(element),
+  '-ne-read-only': (element: Element) => !isReadWrite(element),
   dir: (element: Element, value?: string | null) =>
     direction(element) === value?.trim().toLowerCase(),
   heading: ':is(h1, h2, h3, h4, h5, h6)',
@@ -230,17 +368,26 @@ function compare(a: Specificity, b: Specificity): number {
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
-function maxOf(list: Selector[][]): Specificity {
+function maxOf(list: Selector[][], nesting: Nesting): Specificity {
   let best: Specificity = [0, 0, 0];
   for (const complex of list) {
-    const candidate = specificityOf(complex);
+    const candidate = specificityOf(complex, nesting);
     if (compare(candidate, best) > 0) best = candidate;
   }
   return best;
 }
 
+/**
+ * Private pseudo-classes that stand for the enclosing style rule of a nested
+ * one, with that rule's specificity (the specificity of `:is(parent)`).
+ */
+export type Nesting = Record<
+  string,
+  { test: (element: Element) => boolean; specificity: Specificity }
+>;
+
 /** Selectors Level 4 specificity of one complex selector. */
-export function specificityOf(complex: Selector[]): Specificity {
+export function specificityOf(complex: Selector[], nesting: Nesting = {}): Specificity {
   const total: [number, number, number] = [0, 0, 0];
   for (const token of complex) {
     if (token.type === 'attribute') {
@@ -249,35 +396,109 @@ export function specificityOf(complex: Selector[]): Specificity {
       total[2] += 1;
     } else if (token.type === 'pseudo') {
       if (token.name === 'where') continue;
+      const parent = own(nesting, token.name);
+      if (parent !== undefined) {
+        add(total, parent.specificity);
+        continue;
+      }
       if (Array.isArray(token.data) && SELECTOR_ARGUMENT[token.name] === true) {
-        add(total, maxOf(token.data));
+        add(total, maxOf(token.data, nesting));
         continue;
       }
       total[1] += 1;
       if (typeof token.data === 'string' && /^nth-(last-)?child$/.test(token.name)) {
         const of = /\sof\s+(.+)$/is.exec(token.data);
-        if (of?.[1] !== undefined) add(total, maxOf(parse(of[1])));
+        if (of?.[1] !== undefined) add(total, maxOf(parse(of[1]), nesting));
       }
     }
   }
   return total;
 }
 
-/** Rewrites pseudo-classes for matching: never-matching states, and `:scope` at the root. */
-function rewrite(complex: Selector[]): Selector[] {
+const NEVER_TOKEN: Selector = { type: SelectorType.Pseudo, name: '-ne-never', data: null };
+
+/** css-select aliases that do not follow the HTML specification, evaluated by our own pseudo-classes instead. */
+const OVERRIDDEN: Record<string, string> = {
+  'read-only': '-ne-read-only',
+  'read-write': '-ne-read-write',
+};
+
+/**
+ * css-select's jQuery extensions. Browsers reject them, which drops the whole
+ * rule: accepting `.x:parent { display: block }` would reveal what a browser
+ * keeps hidden.
+ */
+const NONSTANDARD: Record<string, true> = {
+  contains: true,
+  icontains: true,
+  parent: true,
+  header: true,
+  button: true,
+  input: true,
+  text: true,
+  checkbox: true,
+  file: true,
+  password: true,
+  radio: true,
+  reset: true,
+  image: true,
+  submit: true,
+  selected: true,
+};
+
+/**
+ * Rewrites a selector for css-select: states that cannot match become a
+ * never-matching pseudo-class, `:scope` is the root, and namespace prefixes
+ * become a namespace test (`*|p` matches any `p`; an undeclared prefix is a
+ * syntax error).
+ */
+function rewrite(complex: Selector[], namespaces: Readonly<Record<string, string>>): Selector[] {
+  return complex.flatMap((token): Selector[] => {
+    if ((token.type === 'tag' || token.type === 'universal') && token.namespace !== null) {
+      const { namespace } = token;
+      if (namespace === '*') return [{ ...token, namespace: null }];
+      const url = namespace === '' ? null : own(namespaces, namespace);
+      if (url === undefined) throw new SyntaxError(`Undeclared namespace prefix ${namespace}`);
+      return [
+        { ...token, namespace: null },
+        url === null
+          ? NEVER_TOKEN
+          : { type: SelectorType.Pseudo, name: '-ne-namespace', data: url },
+      ];
+    }
+    if (token.type !== 'pseudo') return [token];
+    if (NONSTANDARD[token.name] === true)
+      throw new SyntaxError(`Unknown pseudo-class :${token.name}`);
+    if (NEVER[token.name] === true) return [NEVER_TOKEN];
+    const replacement = own(OVERRIDDEN, token.name);
+    if (replacement !== undefined) return [{ ...token, name: replacement }];
+    if (token.name === 'scope') return [{ type: SelectorType.Pseudo, name: 'root', data: null }];
+    if (Array.isArray(token.data))
+      return [{ ...token, data: token.data.map((inner) => rewrite(inner, namespaces)) }];
+    return [token];
+  });
+}
+
+/**
+ * `:is()` and `:where()` take forgiving selector lists: browsers drop the
+ * arguments they cannot use and keep the rest, so one junk argument must not
+ * invalidate the whole rule.
+ */
+function forgive(complex: Selector[], check: (selector: Selector[]) => boolean): Selector[] {
   return complex.map((token): Selector => {
-    if (token.type !== 'pseudo') return token;
-    if (NEVER[token.name] === true)
-      return { type: SelectorType.Pseudo, name: '-ne-never', data: null };
-    if (token.name === 'scope') return { type: SelectorType.Pseudo, name: 'root', data: null };
-    if (Array.isArray(token.data)) return { ...token, data: token.data.map(rewrite) };
-    return token;
+    if (token.type !== 'pseudo' || !Array.isArray(token.data)) return token;
+    const inner = token.data.map((selector) => forgive(selector, check));
+    if (token.name !== 'is' && token.name !== 'where') return { ...token, data: inner };
+    const usable = inner.filter(
+      (selector) => !selector.some((part) => part.type === 'pseudo-element') && check(selector),
+    );
+    return usable.length === 0 ? NEVER_TOKEN : { ...token, data: usable };
   });
 }
 
 function bucketOf(complex: Selector[], quirks: boolean): string {
   let start = complex.length;
-  while (start > 0 && !COMBINATORS[(complex[start - 1] as Selector).type] === true) start -= 1;
+  while (start > 0 && COMBINATORS[(complex[start - 1] as Selector).type] !== true) start -= 1;
   const compound = complex.slice(start);
   if (!quirks) {
     for (const token of compound) {
@@ -295,7 +516,8 @@ function bucketOf(complex: Selector[], quirks: boolean): string {
     }
   }
   for (const token of compound) {
-    if (token.type === 'tag') return token.name;
+    // Type selectors are case-insensitive, and elements are indexed by lowercase name.
+    if (token.type === 'tag') return token.name.toLowerCase();
   }
   return '*';
 }
@@ -310,30 +532,46 @@ export type SelectorListResult =
  * syntax error, or a selector css-select cannot evaluate) comes back as an
  * error, so the caller can drop the rule and warn.
  */
-export function compileSelectorList(text: string, quirks: boolean): SelectorListResult {
+export function compileSelectorList(
+  text: string,
+  quirks: boolean,
+  nesting: Nesting = {},
+  namespaces: Readonly<Record<string, string>> = {},
+): SelectorListResult {
   let list: Selector[][];
   try {
     list = parse(text);
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error), syntax: true };
   }
-  const options: Options<AnyNode, Element> = { quirksMode: quirks, pseudos: PSEUDOS };
-  const selectors: CompiledSelector[] = [];
   for (const complex of list) {
     for (const token of complex) {
-      const known =
-        PSEUDO_ELEMENTS[token.type === SelectorType.PseudoElement ? token.name : 'before'] === true;
-      if (!known && !/^-(webkit|moz)-/.test((token as { name?: string }).name ?? '')) {
-        return {
-          error: `Unknown pseudo-element ::${(token as { name: string }).name}`,
-          syntax: true,
-        };
+      if (token.type !== 'pseudo-element') continue;
+      if (PSEUDO_ELEMENTS[token.name] !== true && !/^-(webkit|moz)-/.test(token.name)) {
+        return { error: `Unknown pseudo-element ::${token.name}`, syntax: true };
       }
     }
   }
+  const pseudos: Options<AnyNode, Element>['pseudos'] = {
+    ...PSEUDOS,
+    '-ne-namespace': (element: Element, url?: string | null) => element.namespace === url,
+  };
+  for (const [name, parent] of Object.entries(nesting))
+    pseudos[name] = (element: Element) => parent.test(element);
+  const options: Options<AnyNode, Element> = { quirksMode: quirks, pseudos };
+  const compiles = (selector: Selector[]): boolean => {
+    try {
+      compile<AnyNode, Element>([rewrite(selector, namespaces)], options);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const selectors: CompiledSelector[] = [];
   try {
-    for (const complex of list) {
-      const specificity = specificityOf(complex);
+    for (const original of list) {
+      const complex = forgive(original, compiles);
+      const specificity = specificityOf(complex, nesting);
       const index = complex.findIndex((token) => token.type === 'pseudo-element');
       let target = complex;
       let pseudoElement: string | null = null;
@@ -344,10 +582,11 @@ export function compileSelectorList(text: string, quirks: boolean): SelectorList
         pseudoElement = (complex[index] as { name: string }).name;
         target = complex.slice(0, index);
         const last = target[target.length - 1];
-        if (last === undefined || COMBINATORS[last.type] === true)
+        if (last === undefined || COMBINATORS[last.type] === true) {
           target = [...target, { type: SelectorType.Universal, namespace: null }];
+        }
       }
-      const rewritten = rewrite(target);
+      const rewritten = rewrite(target, namespaces);
       selectors.push({
         test: compile<AnyNode, Element>([rewritten], options),
         specificity,
@@ -356,7 +595,8 @@ export function compileSelectorList(text: string, quirks: boolean): SelectorList
       });
     }
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error), syntax: false };
+    const syntax = error instanceof SyntaxError;
+    return { error: error instanceof Error ? error.message : String(error), syntax };
   }
   return { selectors };
 }

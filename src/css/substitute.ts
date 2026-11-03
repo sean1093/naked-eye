@@ -149,6 +149,13 @@ function ifValue(
 /** Deeply nested substitutions are a denial-of-service vector; browsers cap them too. */
 const MAX_DEPTH = 32;
 
+/**
+ * The most component values one substitution may produce. A custom property
+ * that references another twice doubles per level; Blink stops at 65,536
+ * tokens and treats the declaration as invalid at computed-value time.
+ */
+const MAX_VALUES = 65_536;
+
 function substituteAll(
   values: readonly ComponentValue[],
   ctx: SubstitutionContext,
@@ -185,8 +192,8 @@ function substituteAll(
         out.push(new FunctionNode(node.name, node.endToken, inner));
         continue;
       }
-      if (replacement === null) return null;
-      out.push(...replacement);
+      if (replacement === null || out.length + replacement.length > MAX_VALUES) return null;
+      for (const value of replacement) out.push(value);
       continue;
     }
     if (isSimpleBlockNode(node)) {
