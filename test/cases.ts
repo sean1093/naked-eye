@@ -560,18 +560,10 @@ export const cases: Case[] = [
   {
     name: 'a backdrop faded out by a filter or by an ancestor',
     html: '<p style="color: #fff">filtered away</p><div style="position: absolute; inset: 0; background: #000; filter: opacity(0)"></div><p style="color: #fff">under a faded ancestor</p><div style="opacity: 0"><div style="position: absolute; inset: 0; background: #000"></div></div>',
-    visible: 'filtered away\n\nunder a faded ancestor',
-    diverges: [
-      {
-        where: 'browser',
-        visible: '',
-        hidden: [
-          ['low-contrast', 'filtered away'],
-          ['low-contrast', 'under a faded ancestor'],
-        ],
-        reason:
-          "Browser mode multiplies a box's own filter and its ancestors' opacity into the backdrop it paints, so a box that draws nothing rescues nothing; static mode models neither and keeps the text.",
-      },
+    visible: '',
+    hidden: [
+      ['low-contrast', 'filtered away'],
+      ['low-contrast', 'under a faded ancestor'],
     ],
   },
   {

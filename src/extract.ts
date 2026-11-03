@@ -271,23 +271,23 @@ class Extractor {
     if (known !== undefined) return known;
     const painters = new Map<Element, (RGBA | null)[]>();
     this.painters[world] = painters;
-    const visit = (nodes: AnyNode[]): void => {
+    // `fade` is the opacity the ancestors apply: a box inside a faded subtree paints faded too.
+    const visit = (nodes: AnyNode[], fade: number): void => {
       for (const node of nodes) {
         if (isElement(node) === false) continue;
         const style = this.engine.style(node, world);
         if (style.display.kind === 'none') continue;
-        const register = (container: Element | null, painter: Style): void => {
-          if (container === null) return;
+        const faded = fade * style.opacity * style.filterOpacity;
+        const register = (container: Element | null, painter: Style, alpha: number): void => {
+          if (container === null || alpha <= 0) return;
           const { backgroundColor: color } = painter;
           const paint =
-            painter.backgroundImage || color === null
-              ? null
-              : { ...color, a: color.a * painter.opacity };
+            painter.backgroundImage || color === null ? null : { ...color, a: color.a * alpha };
           const list = painters.get(container);
           if (list === undefined) painters.set(container, [paint]);
           else list.push(paint);
         };
-        register(this.paintsUnder(node, style, world, false), style);
+        register(this.paintsUnder(node, style, world, false), style, faded);
         // A positioned ::before or ::after is the usual overlay behind a hero's text.
         if (node.namespace === HTML_NAMESPACE && own(NO_PSEUDO, node.name) !== true) {
           for (const which of ['before', 'after'] as const) {
@@ -296,14 +296,16 @@ class Extractor {
               generated !== null &&
               generated.content !== null &&
               generated.display.kind !== 'none'
-            )
-              register(this.paintsUnder(node, generated, world, true), generated);
+            ) {
+              const alpha = faded * generated.opacity * generated.filterOpacity;
+              register(this.paintsUnder(node, generated, world, true), generated, alpha);
+            }
           }
         }
-        visit(this.flatChildren(node));
+        visit(this.flatChildren(node), faded);
       }
     };
-    if (this.root !== undefined) visit([this.root]);
+    if (this.root !== undefined) visit([this.root], 1);
     return painters;
   }
 
