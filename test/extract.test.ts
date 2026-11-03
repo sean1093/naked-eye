@@ -165,16 +165,30 @@ describe('extractVisible', () => {
     });
   });
 
-  it('reports invisible characters against the element that holds them', () => {
-    const { hidden } = extractVisible(documentOf('<div id="note">ok\u200B</div>'));
-    expect(hidden).toEqual([
-      {
-        text: 'U+200B',
-        reason: 'invisible-unicode',
-        selector: '#note',
-        detail: '1 zero-width characters',
-      },
+  it('reports invisible characters against the element that holds them, in order', () => {
+    const { hidden } = extractVisible(documentOf('<div id="note">ok\u200B\u{E0041}</div>'));
+    expect(hidden.map(({ text, reason, selector }) => ({ text, reason, selector }))).toEqual([
+      { text: 'U+200B', reason: 'invisible-unicode', selector: '#note' },
+      { text: 'A', reason: 'invisible-unicode', selector: '#note' },
     ]);
+  });
+
+  it('removes glyph variation selectors without reporting them', () => {
+    const result = extractVisible(
+      documentOf('<p>\u845B\u{E0100} \u2268\uFE00 \u182E\u1823\u180B</p>'),
+    );
+    expect(result.text).toBe('\u845B \u2268 \u182E\u1823');
+    expect(result.hidden).toEqual([]);
+  });
+
+  it('keeps a joiner that inline markup separates from the letters it joins', () => {
+    const result = extractVisible(
+      documentOf(
+        '<p><b>\u0645\u06CC</b>\u200C\u0631\u0648\u0645</p><p><b>\u0915\u094D</b>\u200D\u0937</p>',
+      ),
+    );
+    expect(result.text).toBe('\u0645\u06CC\u200C\u0631\u0648\u0645\n\n\u0915\u094D\u200D\u0937');
+    expect(result.hidden).toEqual([]);
   });
 
   it('handles fragments and empty input', () => {

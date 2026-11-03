@@ -1,11 +1,12 @@
 /**
  * Characters that render as nothing but that models read: Unicode tag
- * characters, variation-selector runs, zero-width and bidirectional controls.
- * They are removed from visible text, and what they encoded is decoded for the
- * report wherever an encoding is known.
+ * characters, variation-selector runs, zero-width and bidirectional controls,
+ * and the rest of Unicode's default-ignorable code points. They are removed
+ * from visible text, and what they encoded is decoded for the report wherever
+ * an encoding is known.
  */
 
-export type InvisibleKind = 'tag' | 'variation-selector' | 'zero-width' | 'bidi';
+type InvisibleKind = 'tag' | 'variation-selector' | 'zero-width' | 'bidi';
 
 export interface Removal {
   kind: InvisibleKind;
@@ -17,12 +18,16 @@ export interface Removal {
 /** Cheap pre-check: whether a string may contain anything this module removes. */
 export const MAY_CONTAIN_INVISIBLE =
   // biome-ignore lint/suspicious/noMisleadingCharacterClass: every member is an escaped code point, matched alone under the u flag.
-  /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFB\u{E0000}-\u{E01EF}\u{1D173}-\u{1D17A}\u{1BCA0}-\u{1BCA3}]/u;
+  /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB\u{E0000}-\u{E0FFF}\u{1D173}-\u{1D17A}\u{1BCA0}-\u{1BCA3}]/u;
 
-const BIDI = new Set([
-  0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
-]);
+const isBidi = (code: number): boolean =>
+  code === 0x061c ||
+  code === 0x200e ||
+  code === 0x200f ||
+  (code >= 0x202a && code <= 0x202e) ||
+  (code >= 0x2066 && code <= 0x2069);
 
+/** Default-ignorable code points that are neither tags, selectors, joiners nor bidi controls. */
 function isZeroWidth(code: number): boolean {
   return (
     code === 0x034f ||
@@ -37,9 +42,11 @@ function isZeroWidth(code: number): boolean {
     code === 0x3164 ||
     code === 0xfeff ||
     code === 0xffa0 ||
-    (code >= 0xfff9 && code <= 0xfffb) ||
+    (code >= 0xfff0 && code <= 0xfffb) ||
     (code >= 0x1d173 && code <= 0x1d17a) ||
-    (code >= 0x1bca0 && code <= 0x1bca3)
+    (code >= 0x1bca0 && code <= 0x1bca3) ||
+    (code >= 0xe0080 && code <= 0xe00ff) ||
+    (code >= 0xe01f0 && code <= 0xe0fff)
   );
 }
 
@@ -54,16 +61,39 @@ const isVariationSelector = (code: number): boolean =>
 
 const isJoiner = (code: number): boolean => code === 0x200c || code === 0x200d;
 
-/** A neighbour that a joiner can act on: anything outside ASCII that is not itself invisible. */
-function joinable(code: number | undefined): boolean {
-  if (code === undefined || code < 0x80) return false;
+/** Characters with an emoji presentation, which U+FE0E and U+FE0F choose between. */
+const EMOJI = /\p{Emoji}/u;
+/** What a ZWJ joins in an emoji sequence: a pictograph, modifier or presentation selector, then a pictograph. */
+const EMOJI_BEFORE_JOINER = /[\p{Extended_Pictographic}\p{Emoji_Modifier}]|\uFE0F/u;
+const EMOJI_AFTER_JOINER = /\p{Extended_Pictographic}/u;
+/** Scripts whose shaping ZWJ and ZWNJ control: Arabic-script joining, Indic conjuncts and half forms. */
+const JOINING_SCRIPT =
+  /[\p{sc=Arab}\p{sc=Syrc}\p{sc=Nkoo}\p{sc=Mong}\p{sc=Deva}\p{sc=Beng}\p{sc=Guru}\p{sc=Gujr}\p{sc=Orya}\p{sc=Taml}\p{sc=Telu}\p{sc=Knda}\p{sc=Mlym}\p{sc=Sinh}\p{sc=Mymr}\p{sc=Khmr}]/u;
+/** Bases of standardized variation sequences: mathematical symbols and the scripts that have them. */
+const STANDARDIZED_BASE = /[\p{Sm}\p{sc=Han}\p{sc=Mymr}\p{sc=Phag}\p{sc=Mani}\p{sc=Egyp}]/u;
+
+/** A joiner between these two characters changes how they render. */
+function joins(before: number | undefined, after: number | undefined): boolean {
+  if (before === undefined || after === undefined) return false;
+  const left = String.fromCodePoint(before);
+  const right = String.fromCodePoint(after);
   return (
-    !isTag(code) &&
-    !isZeroWidth(code) &&
-    !BIDI.has(code) &&
-    !isJoiner(code) &&
-    !/\s/u.test(String.fromCodePoint(code))
+    (EMOJI_BEFORE_JOINER.test(left) && EMOJI_AFTER_JOINER.test(right)) ||
+    (JOINING_SCRIPT.test(left) && JOINING_SCRIPT.test(right))
   );
+}
+
+/**
+ * A single selector that picks a glyph variant of its base: an ideographic
+ * variation sequence, a standardized variant, or a Mongolian free variation
+ * selector. It is typography, not a payload.
+ */
+function picksGlyph(code: number, before: number | undefined): boolean {
+  if (before === undefined) return false;
+  const base = String.fromCodePoint(before);
+  if (code >= 0xe0100) return /\p{sc=Han}/u.test(base);
+  if (code >= 0x180b && code <= 0x180f) return /\p{sc=Mong}/u.test(base);
+  return code <= 0xfe0d && STANDARDIZED_BASE.test(base);
 }
 
 /** The tag sequences of the three emoji flags Unicode recommends: England, Scotland, Wales. */
@@ -84,65 +114,110 @@ function decodeSelectors(codes: number[]): string {
   return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
-/** Removes invisible characters, returning the cleaned text and one removal per kind. */
-export function stripInvisible(input: string): { text: string; removals: Removal[] } {
-  const codes = Array.from(input, (character) => character.codePointAt(0) as number);
-  const kept: number[] = [];
-  const output: string[] = [];
+/**
+ * Removes invisible characters, returning the cleaned text and one removal
+ * per kind, in the order each kind first occurs. `before` and `after` are the
+ * visible characters around the text, which decide whether a joiner or a
+ * selector at its edge is kept. Untouched spans are copied, not expanded.
+ */
+export function stripInvisible(
+  input: string,
+  before?: number,
+  after?: number,
+): { text: string; removals: Removal[] } {
+  const parts: string[] = [];
+  let from = 0;
+  let previous = before;
   const tags: number[] = [];
   const selectors: number[][] = [];
   const zeroWidth: number[] = [];
   const bidi: number[] = [];
+  const firstAt: Partial<Record<InvisibleKind, number>> = {};
+  const remove = (start: number, end: number, kind: InvisibleKind | null): void => {
+    if (start > from) parts.push(input.slice(from, start));
+    from = end;
+    if (kind !== null) firstAt[kind] ??= start;
+  };
+  /** The code points from `start` while `test` holds, and the index after them. */
+  const run = (start: number, test: (code: number) => boolean): [number[], number] => {
+    const codes: number[] = [];
+    let end = start;
+    for (
+      let code = input.codePointAt(end);
+      code !== undefined && test(code);
+      code = input.codePointAt(end)
+    ) {
+      codes.push(code);
+      end += code > 0xffff ? 2 : 1;
+    }
+    return [codes, end];
+  };
 
-  for (let index = 0; index < codes.length; index += 1) {
-    const code = codes[index] as number;
+  let index = 0;
+  while (index < input.length) {
+    const code = input.codePointAt(index) as number;
+    const size = code > 0xffff ? 2 : 1;
 
     if (isTag(code)) {
-      let end = index;
-      while (end < codes.length && isTag(codes[end] as number)) end += 1;
-      const run = codes.slice(index, end);
-      const spelled = run
+      const [codes, end] = run(index, isTag);
+      const spelled = codes
         .slice(0, -1)
         .map((tag) => String.fromCodePoint(tag - 0xe0000))
         .join('');
       const flag =
-        kept[kept.length - 1] === 0x1f3f4 &&
-        run[run.length - 1] === 0xe007f &&
-        FLAG_TAGS.includes(spelled);
-      if (flag) kept.push(...run);
-      else tags.push(...run);
-      index = end - 1;
+        previous === 0x1f3f4 && codes[codes.length - 1] === 0xe007f && FLAG_TAGS.includes(spelled);
+      if (flag) previous = 0xe007f;
+      else {
+        remove(index, end, 'tag');
+        for (const tag of codes) tags.push(tag);
+      }
+      index = end;
       continue;
     }
 
     if (isVariationSelector(code)) {
-      let end = index;
-      while (end < codes.length && isVariationSelector(codes[end] as number)) end += 1;
-      const run = codes.slice(index, end);
-      const previous = kept[kept.length - 1];
-      // One presentation selector right after a base character is ordinary emoji or text style.
+      const [codes, end] = run(index, isVariationSelector);
+      const single = codes.length === 1;
+      // One presentation selector after an emoji is ordinary emoji or text style.
       const presentation =
-        run.length === 1 &&
+        single &&
         (code === 0xfe0e || code === 0xfe0f) &&
         previous !== undefined &&
-        !/\s/u.test(String.fromCodePoint(previous));
-      if (presentation) kept.push(code);
-      else selectors.push(run);
-      index = end - 1;
+        EMOJI.test(String.fromCodePoint(previous));
+      if (presentation) previous = code;
+      else if (single && picksGlyph(code, previous)) remove(index, end, null);
+      else {
+        remove(index, end, 'variation-selector');
+        selectors.push(codes);
+      }
+      index = end;
       continue;
     }
 
     if (isJoiner(code)) {
-      const single = !isJoiner(codes[index + 1] ?? 0) && !isJoiner(kept[kept.length - 1] ?? 0);
-      if (single && joinable(kept[kept.length - 1]) && joinable(codes[index + 1])) kept.push(code);
-      else zeroWidth.push(code);
+      const next = index + size < input.length ? input.codePointAt(index + size) : after;
+      const lone =
+        (next === undefined || isJoiner(next) === false) &&
+        (previous === undefined || isJoiner(previous) === false);
+      if (lone && joins(previous, next)) previous = code;
+      else {
+        remove(index, index + size, 'zero-width');
+        zeroWidth.push(code);
+      }
+      index += size;
       continue;
     }
 
-    if (code === 0x00ad) continue; // A soft hyphen is typography, not a payload: removed silently.
-    if (BIDI.has(code)) bidi.push(code);
-    else if (isZeroWidth(code)) zeroWidth.push(code);
-    else kept.push(code);
+    // A soft hyphen is typography, not a payload: removed silently.
+    if (code === 0x00ad) remove(index, index + size, null);
+    else if (isBidi(code)) {
+      remove(index, index + size, 'bidi');
+      bidi.push(code);
+    } else if (isZeroWidth(code)) {
+      remove(index, index + size, 'zero-width');
+      zeroWidth.push(code);
+    } else previous = code;
+    index += size;
   }
 
   const removals: Removal[] = [];
@@ -161,13 +236,13 @@ export function stripInvisible(input: string): { text: string; removals: Removal
   if (selectors.length > 0) {
     const all = selectors.flat();
     const decoded = selectors
-      .filter((run) => run.length > 1)
+      .filter((codes) => codes.length > 1)
       .map(decodeSelectors)
       .join(' ');
     const printable = Array.from(decoded)
       .filter((character) => {
-        const code = character.codePointAt(0) as number;
-        return code >= 0x20 && code !== 0x7f && code !== 0xfffd;
+        const value = character.codePointAt(0) as number;
+        return value >= 0x20 && value !== 0x7f && value !== 0xfffd;
       })
       .join('')
       .trim();
@@ -180,7 +255,9 @@ export function stripInvisible(input: string): { text: string; removals: Removal
   if (zeroWidth.length > 0)
     removals.push({ kind: 'zero-width', text: codePoints(zeroWidth), count: zeroWidth.length });
   if (bidi.length > 0) removals.push({ kind: 'bidi', text: codePoints(bidi), count: bidi.length });
+  removals.sort((a, b) => (firstAt[a.kind] ?? 0) - (firstAt[b.kind] ?? 0));
 
-  for (const code of kept) output.push(String.fromCodePoint(code));
-  return { text: output.join(''), removals };
+  if (from === 0) return { text: input, removals };
+  if (from < input.length) parts.push(input.slice(from));
+  return { text: parts.join(''), removals };
 }

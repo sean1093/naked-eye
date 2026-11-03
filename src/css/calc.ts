@@ -313,9 +313,9 @@ function evaluateFunction(expr: Extract<Expr, { op: 'fn' }>, ctx: Context): Type
 
   switch (name) {
     case 'min':
-      return result(Math.min(...numbers));
+      return result(numbers.reduce((low, value) => Math.min(low, value)));
     case 'max':
-      return result(Math.max(...numbers));
+      return result(numbers.reduce((high, value) => Math.max(high, value)));
     case 'clamp': {
       if (args.length !== 3) return null;
       const [low, center, high] = args;

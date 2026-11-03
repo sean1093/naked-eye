@@ -208,6 +208,28 @@ describe('hostile input stays bounded', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it('handles lists longer than a function call can take as arguments', () => {
+    const wide = 150_000;
+    const tags = extractVisible(`${STANDARDS}<p>x${'\u{E0041}'.repeat(wide)}</p>`);
+    expect(tags.text).toBe('x');
+    expect(tags.hidden[0]?.text).toHaveLength(wide);
+    expect(extractVisible(`${STANDARDS}<body>${'<b>x</b>'.repeat(wide)}</body>`).text).toHaveLength(
+      wide,
+    );
+    const template = extractVisible(
+      `${STANDARDS}<body><template>${'<b>x</b>'.repeat(wide)}</template></body>`,
+    );
+    expect(template.text).toBe('');
+    expect(template.hidden[0]?.reason).toBe('not-rendered');
+    const options = `<select><optgroup>${'<option>x</option>'.repeat(wide)}</optgroup></select>`;
+    expect(extractVisible(`${STANDARDS}${options}`).text).toBe('x');
+    const lengths = Array(wide).fill('0px').join(',');
+    expect(extractVisible(`${STANDARDS}<p style="font-size: max(${lengths})">x</p>`).text).toBe('');
+    expect(extractVisible(`${STANDARDS}<p style="${'opacity: 0;'.repeat(wide)}">x</p>`).text).toBe(
+      '',
+    );
+  }, 30_000);
+
   it('parses each imported style sheet once and caps how many are applied', () => {
     const stylesheets: Record<string, string> = { 's6.css': 'p { display: none }' };
     for (let level = 0; level < 6; level += 1) {

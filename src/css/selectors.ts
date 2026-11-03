@@ -206,7 +206,7 @@ function isInvalid(element: Element): boolean {
     const node = stack.pop() as AnyNode;
     if (node.type !== 'tag') continue;
     if (CONTROLS[node.name] === true && failsConstraints(node)) return true;
-    stack.push(...node.children);
+    for (const child of node.children) stack.push(child);
   }
   return false;
 }
