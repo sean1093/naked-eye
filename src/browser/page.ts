@@ -888,7 +888,8 @@ class Extractor {
     const [edgeX, edgeY] = [view.innerWidth, view.innerHeight];
     const add = (box: Rect, layer: Layer, fixed: boolean, under: Element, fade: number): void => {
       const alpha = (layer.color?.a ?? 1) * fade;
-      if (!layer.image && alpha === 0) return;
+      // Faded below what text would need to be seen, a box paints nothing, image or not.
+      if (fade < this.limits.minOpacity || (!layer.image && alpha === 0)) return;
       // A fixed box that fills the viewport stays behind the text at every
       // scroll offset, so it covers the whole document; a smaller one only
       // covers where it sits.

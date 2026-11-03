@@ -567,6 +567,12 @@ export const cases: Case[] = [
     ],
   },
   {
+    name: 'a faded image backdrop does not rescue text',
+    html: '<p style="color: #fff">faded image</p><div style="position: absolute; inset: 0; background: url(backdrop.png); opacity: 0.004"></div>',
+    visible: '',
+    hidden: [['low-contrast', 'faded image']],
+  },
+  {
     name: 'a backdrop an opaque background hides does not rescue text',
     html: '<div style="background: #fff; position: relative; z-index: 1"><p style="color: #fff">white on white</p></div><div style="position: absolute; inset: 0; background: #000; z-index: 0"></div>',
     visible: '',

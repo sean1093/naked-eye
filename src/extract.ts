@@ -279,7 +279,8 @@ class Extractor {
         if (style.display.kind === 'none') continue;
         const faded = fade * style.opacity * style.filterOpacity;
         const register = (container: Element | null, painter: Style, alpha: number): void => {
-          if (container === null || alpha <= 0) return;
+          // Faded below what text would need to be seen, a box paints nothing, image or not.
+          if (container === null || alpha < this.limits.minOpacity) return;
           const { backgroundColor: color } = painter;
           const paint =
             painter.backgroundImage || color === null ? null : { ...color, a: color.a * alpha };
