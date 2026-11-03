@@ -20,4 +20,4 @@ and browser mode:
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/sean1093/naked-eye/blob/main/LICENSE)

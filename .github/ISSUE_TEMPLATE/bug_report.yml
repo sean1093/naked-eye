@@ -1,0 +1,101 @@
+name: Bug report
+description: Visible text is dropped, a finding is wrong, or the extractor misbehaves.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report. The smallest HTML document that shows the
+        problem is worth more than any amount of description.
+
+        **Hidden text that reaches the output is a vulnerability.** Do not report
+        it here. Use
+        [private reporting](https://github.com/sean1093/naked-eye/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >-
+        What did you observe? Include the returned `text`, the relevant `hidden`
+        findings, or the exact error message.
+      placeholder: The paragraph is visible in the browser but missing from `text`, reported as `off-screen`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest HTML document and call that show the problem.
+      render: javascript
+      placeholder: |
+        import { extractVisible } from 'naked-eye';
+
+        const html = '<p style="position: absolute; left: 10px">Visible</p>';
+        console.log(extractVisible(html));
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: >-
+        What should have happened? If a browser renders the document differently,
+        name the browser and its version.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Static (extractVisible)
+        - Browser with Playwright (extractVisibleFromPage)
+        - Browser with Puppeteer (extractVisibleFromPage)
+      default: 0
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: naked-eye version
+      description: "`npm ls naked-eye`"
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      description: >-
+        Node.js, Deno, Bun or Workers and its version; for browser mode, also the
+        browser and its version.
+      placeholder: Node.js v22.11.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Workarounds you found, when it started, or a link to a failing branch.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing open and closed issues and this is not a duplicate.
+          required: true
+        - label: This report is not hidden text reaching the output, which belongs in private reporting.
+          required: true

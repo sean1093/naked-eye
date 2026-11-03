@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a capability naked-eye does not have yet.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read
+        [What does not belong in this library](https://github.com/sean1093/naked-eye/blob/main/CONTRIBUTING.md#what-does-not-belong-in-this-library)
+        first. Classifying visible text, OCR, other document formats, HTML
+        sanitizing, fetching and browser management are settled non-goals.
+
+        A hiding technique the library misses is a security report, not a
+        feature request. Use
+        [private reporting](https://github.com/sean1093/naked-eye/security/advisories/new).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: >-
+        What are you trying to do, and what makes it awkward or impossible with
+        the current API? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API or behaviour
+      description: Sketch the option, function or output change, with an example input and its result.
+      render: typescript
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you try instead, and why was it not good enough?
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and cost
+      description: >-
+        Does this change existing output? Does it need a new dependency? Say so if
+        you are willing to open the pull request.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing open and closed issues and this is not a duplicate.
+          required: true
+        - label: I read the non-goals in CONTRIBUTING.md and this request is not one of them.
+          required: true
