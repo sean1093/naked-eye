@@ -281,7 +281,19 @@ document, with a warning.
   static mode on the response HTML as well.
 - **Closed shadow roots** cannot be read from the page; their text is missing
   from `text`.
-- **Cross-origin frames** cannot be read; they are listed in `warnings`.
+- **Cross-origin frames** cannot be read; they are listed in `warnings` with
+  the `cross-origin-frame` code. Same-origin frames are read in place.
+- **Scrolling counts as reachable.** Text a reader can bring into view by
+  scrolling the page, or a box with `overflow: auto` or `scroll`, is on screen.
+  Only what no scrolling reaches — outside the document's scrollable area, or
+  cut off by `overflow: hidden`, `overflow: clip` or paint containment — is
+  reported as `off-screen` or `clipped`.
+- **Generated content has no box to measure.** `::before` and `::after` are
+  judged from their computed styles alone, not from where they land.
+- **Thresholds only.** `extractVisibleFromPage` takes `minFontSize`,
+  `minOpacity` and `minContrast`. The viewport, the color scheme and the style
+  sheets are the open page's own, and off-screen text is decided by real
+  geometry rather than by a distance.
 - **Timing.** The result is a snapshot. Content that appears later, or blinks,
   is judged as it was at the moment of extraction.
 
