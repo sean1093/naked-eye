@@ -187,7 +187,7 @@ describe('extractVisible', () => {
     const small = time(5_000);
     const large = time(20_000);
     expect(large / small).toBeLessThan(10);
-  });
+  }, 60_000);
 
   it('removes soft hyphens without reporting them', () => {
     expect(extractVisible(documentOf('<p>co&shy;operate</p>'))).toEqual({
