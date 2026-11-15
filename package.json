@@ -108,6 +108,6 @@
     "domhandler": "^6.0.1",
     "domutils": "^4.0.2",
     "parse5": "^8.1.0",
-    "parse5-htmlparser2-tree-adapter": "^8.0.1"
+    "parse5-htmlparser2-tree-adapter": "^8.0.2"
   }
 }
