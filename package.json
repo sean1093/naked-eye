@@ -101,7 +101,7 @@
     "vitest": "^5.1.0"
   },
   "dependencies": {
-    "@csstools/css-parser-algorithms": "^4.0.2",
+    "@csstools/css-parser-algorithms": "^4.0.3",
     "@csstools/css-tokenizer": "^4.0.2",
     "css-select": "^7.0.0",
     "css-what": "^8.0.0",
