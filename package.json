@@ -102,7 +102,7 @@
   },
   "dependencies": {
     "@csstools/css-parser-algorithms": "^4.0.2",
-    "@csstools/css-tokenizer": "^4.0.2",
+    "@csstools/css-tokenizer": "^4.0.3",
     "css-select": "^7.0.0",
     "css-what": "^8.0.0",
     "domhandler": "^6.0.1",
